@@ -1,0 +1,23 @@
+# Extra Python packages needed by lc_07_gemma2b_imdb.py when the venv is
+# created with --system-site-packages and Gentoo already provides torch,
+# transformers, CUDA libraries, and other heavy global packages.
+#
+# Install with:
+#   .venv/bin/python -m pip install --no-deps -r requirements-lc07.txt
+#
+# Do NOT install this file without --no-deps on this Gentoo/Blackwell setup:
+# pip will try to pull its own torch + CUDA wheel stack and shadow the global
+# Gentoo torch build.
+# Provided by Gentoo host:
+# accelerate
+# scikit-learn
+# joblib
+# narwhals
+# threadpoolctl
+# bitsandbytes
+# pyarrow
+# multiprocess
+# datasets (sci-ml/datasets ebuild)
+# peft
+
+# Local venv additions:
