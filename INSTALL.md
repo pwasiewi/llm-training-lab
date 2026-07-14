@@ -34,6 +34,35 @@ documented there plus script defaults. General rules:
   OOM crashes.
 - All commands run from `~/Claude/llm/`.
 
+## 2026-07-14 — official unsloth Qwen3.6-35B-A3B-GGUF vs Ornith
+
+```bash
+# ncmoe floor sweep per quant (descending probe)
+M=$HOME/models/qwen36-unsloth/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf
+MODEL=$M NCMOE_LIST=12,10,9   ./bench_01_llamacpp.sh -b   # floor 10 (9 OOMs)
+
+M=$HOME/models/qwen36-unsloth/Qwen3.6-35B-A3B-MXFP4_MOE.gguf
+MODEL=$M NCMOE_LIST=20,18,16 ./bench_01_llamacpp.sh -b
+MODEL=$M NCMOE_LIST=15,14,13 ./bench_01_llamacpp.sh -b    # all OOM → floor 16
+
+M=$HOME/models/qwen36-unsloth/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+MODEL=$M NCMOE_LIST=24,20,18 ./bench_01_llamacpp.sh -b
+MODEL=$M NCMOE_LIST=16,15,14 ./bench_01_llamacpp.sh -b    # all OOM
+MODEL=$M NCMOE_LIST=17       ./bench_01_llamacpp.sh -b    # floor 17
+
+# agentic comparison @128K, TASK_TIMEOUT=900 (default)
+# profiles from ~/.aillama/models.conf at test time — qwen36u-iq4xs*/
+# qwen36u-q4kxl* were deleted afterward (worst 2 of 3, see BENCH.md);
+# qwen36u-mxfp4* is the survivor.
+MODELS=qwen36u-iq4xs-128k,qwen36u-mxfp4-128k,qwen36u-q4kxl-128k,ornith-128k \
+TASKS=bugfix,scratch,lru,multifile,template,interp,perf,regex \
+./bench_05_agentic.sh
+
+# ornith-128k/interp TIMEOUTed at 900s (10/13 tests, unary minus unfinished);
+# re-run alone at the 07-13-tiebreak budget to check if it was budget, not capability:
+MODELS=ornith-128k TASKS=interp TASK_TIMEOUT=1200 ./bench_05_agentic.sh   # PASS 1067s
+```
+
 ## 2026-07-13 — GLM-4.7-Flash refresh (bench_01 defaults = this model)
 
 ```bash

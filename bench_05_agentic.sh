@@ -2,16 +2,31 @@
 # bench_05_agentic.sh — agentic coding capability benchmark via qwen-code
 # Part of the bench_NN_* series. Unlike 01-04 (raw pp/tg throughput), this
 # measures whether a model driven by qwen-code (headless, --approval-mode yolo)
-# actually SOLVES programming tasks end-to-end. Three tasks, increasing
+# actually SOLVES programming tasks end-to-end. Twelve tasks, increasing
 # difficulty, each verified objectively by this script (protected-file
 # checksums + our own pytest / functional checks — the agent's own claims
-# and self-written tests are never trusted for the verdict):
+# and self-written tests are never trusted for the verdict). Every verdict
+# also carries a SCORE (tests passed / total, percent) — including TIMEOUT,
+# which is scored on whatever the agent left behind at the cutoff.
 #   bugfix    — failing pytest, find & fix a bug in stats.py
 #   scratch   — build a CLI tool + own tests from an empty directory
 #   lru       — implement LRUCache (capacity + TTL + injectable clock) from
 #               a provided test suite only (TDD-style)
 #   multifile — three distinct bugs across three modules (mutable default,
 #               truncation vs half-up rounding, state aliasing at checkout)
+#   intervals — implement a booking Scheduler (half-open overlap rejection,
+#               exact-match cancel, earliest-free-slot search) from tests
+#   fsm       — implement an Order state machine (guarded transitions,
+#               accumulating payment with atomic overpay rejection,
+#               refunds, state history) from tests
+#   codec     — implement a binary frame codec (LEB128 varint length +
+#               payload + XOR checksum) from tests with exact byte-literal
+#               assertions; malformed input must raise. Byte/bit-level
+#               reasoning axis — small code, trap-dense, fast to verify
+#   toposort  — implement a deterministic topological sort (the
+#               lexicographically smallest valid order — requires a heap,
+#               naive FIFO Kahn fails) with CycleError(ValueError) cycle
+#               detection. Graph + determinism axis, equally quick
 #   template  — implement a mini template engine ({{ var }}, dotted lookup,
 #               {% if %}/{% else %}, nestable {% for %}) from tests
 #   interp    — implement an expression evaluator (precedence, right-assoc ^,
@@ -28,7 +43,7 @@
 set -euo pipefail
 
 MODELS="${MODELS:-qwen36-128k,qwythos}"
-TASKS="${TASKS:-bugfix,scratch,lru,multifile,template,interp,perf,regex}"
+TASKS="${TASKS:-bugfix,scratch,lru,multifile,intervals,fsm,codec,toposort,template,interp,perf,regex}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-900}"
 WORKROOT="${WORKROOT:-/tmp/bench-agentic}"
 AILLAMA_BIN="${AILLAMA_BIN:-aillama}"
@@ -37,6 +52,26 @@ export QWEN_CODE_SUPPRESS_YOLO_WARNING=1
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# Run the task's pytest suite (quiet, no tracebacks), write the pass ratio
+# "passed/total (pct%)" to $1/.score, and succeed only when every test
+# passed. $3 = expected test count of a protected suite, so a missing or
+# unimportable solution scores 0/N instead of 0/0 (0 = agent-written suite,
+# total is whatever pytest collected). Written to a file, not a global,
+# because verify_* runs inside a $(...) subshell in run_task.
+scored_pytest() {
+	local dir="$1" tmo="${2:-120}" expected="${3:-0}" out passed failed total
+	out=$( (cd "$dir" && timeout "$tmo" python -m pytest -q --tb=no 2>&1) || true )
+	passed=$(grep -oE '[0-9]+ passed' <<<"$out" | tail -1 | cut -d' ' -f1) || true
+	failed=$(grep -oE '[0-9]+ (failed|error)' <<<"$out" | awk '{s+=$1} END {print s+0}') || true
+	passed=${passed:-0}; failed=${failed:-0}
+	total=$(( passed + failed ))
+	(( total < expected )) && total=$expected
+	if (( total > 0 )); then
+		echo "$passed/$total ($(( 100 * passed / total ))%)" >"$dir/.score"
+	fi
+	(( passed > 0 && passed == total ))
+}
+
 pomoc() {
 	cat <<EOF
 Usage: ${0##*/} [-h]
@@ -44,7 +79,9 @@ Usage: ${0##*/} [-h]
 Agentic coding benchmark: for each aillama profile in MODELS, switch the
 llama-server to it and run each task in TASKS through headless qwen-code,
 then verify the result objectively (script-side pytest + checksums).
-Prints a PASS/FAIL + wall-time summary table.
+Prints a summary table: verdict (PASS/FAIL/TIMEOUT), SCORE (tests passed /
+total with percentage — TIMEOUT is scored on the work left at the cutoff)
+and wall time.
 
 The server is left running on the LAST profile in MODELS.
 
@@ -107,7 +144,7 @@ prompt_bugfix() {
 verify_bugfix() {
 	local dir="$1"
 	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
-	(cd "$dir" && python -m pytest -q >/dev/null 2>&1) || { echo "pytest still failing"; return 1; }
+	scored_pytest "$dir" 120 4 || { echo "pytest still failing"; return 1; }
 	return 0
 }
 
@@ -128,7 +165,7 @@ verify_scratch() {
 	out=$(cd "$dir" && timeout 30 python wordfreq.py .check.txt --top 3 2>/dev/null) || { echo "CLI crashed"; return 1; }
 	expected=$(printf 'the 3\ncat 2\ndog 2')
 	[[ "$out" == "$expected" ]] || { echo "wrong output: $(echo "$out" | tr '\n' '|')"; return 1; }
-	(cd "$dir" && python -m pytest -q >/dev/null 2>&1) || { echo "agent's own tests fail"; return 1; }
+	scored_pytest "$dir" 120 || { echo "agent's own tests fail"; return 1; }
 	return 0
 }
 
@@ -206,7 +243,7 @@ verify_lru() {
 	local dir="$1"
 	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
 	[[ -f "$dir/lru.py" ]] || { echo "lru.py not created"; return 1; }
-	(cd "$dir" && python -m pytest -q >/dev/null 2>&1) || { echo "pytest failing"; return 1; }
+	scored_pytest "$dir" 120 8 || { echo "pytest failing"; return 1; }
 	return 0
 }
 
@@ -305,7 +342,382 @@ prompt_multifile() {
 verify_multifile() {
 	local dir="$1"
 	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
-	(cd "$dir" && python -m pytest -q >/dev/null 2>&1) || { echo "pytest still failing"; return 1; }
+	scored_pytest "$dir" 120 5 || { echo "pytest still failing"; return 1; }
+	return 0
+}
+
+setup_intervals() {
+	local dir="$1"
+	cat >"$dir/test_booking.py" <<'EOF'
+# Spec-by-tests: implement booking.py with class Scheduler:
+#   book(start, end) -> bool      — reserve half-open [start, end); False if
+#                                   it overlaps an existing booking
+#   cancel(start, end) -> bool    — remove an exact existing booking
+#   bookings() -> list[(s, e)]    — current bookings sorted by start
+#   next_free(t, duration) -> int — earliest start >= t of a free slot of
+#                                   the given length
+import pytest
+from booking import Scheduler
+
+def test_book_and_list():
+    s = Scheduler()
+    assert s.book(10, 20) is True
+    assert s.bookings() == [(10, 20)]
+
+def test_bookings_sorted():
+    s = Scheduler()
+    s.book(30, 40); s.book(10, 20)
+    assert s.bookings() == [(10, 20), (30, 40)]
+
+def test_reject_duplicate():
+    s = Scheduler()
+    s.book(10, 20)
+    assert s.book(10, 20) is False
+
+def test_reject_partial_overlap():
+    s = Scheduler()
+    s.book(10, 20)
+    assert s.book(15, 25) is False
+    assert s.book(5, 15) is False
+
+def test_reject_contained_and_containing():
+    s = Scheduler()
+    s.book(10, 20)
+    assert s.book(12, 18) is False
+    assert s.book(5, 25) is False
+
+def test_adjacent_is_free():
+    s = Scheduler()
+    s.book(10, 20)
+    assert s.book(20, 30) is True
+    assert s.book(0, 10) is True
+
+def test_invalid_interval_raises():
+    s = Scheduler()
+    with pytest.raises(ValueError):
+        s.book(20, 10)
+    with pytest.raises(ValueError):
+        s.book(10, 10)
+
+def test_cancel_exact_only():
+    s = Scheduler()
+    s.book(10, 20)
+    assert s.cancel(12, 18) is False
+    assert s.cancel(10, 20) is True
+    assert s.bookings() == []
+    assert s.cancel(10, 20) is False
+
+def test_rebook_after_cancel():
+    s = Scheduler()
+    s.book(10, 20)
+    s.cancel(10, 20)
+    assert s.book(15, 25) is True
+
+def test_next_free_empty_and_before():
+    s = Scheduler()
+    assert s.next_free(7, 10) == 7
+    s.book(30, 40)
+    assert s.next_free(0, 10) == 0
+
+def test_next_free_skips_bookings():
+    s = Scheduler()
+    s.book(10, 20); s.book(30, 40)
+    assert s.next_free(12, 5) == 20      # inside a booking -> next gap
+    assert s.next_free(12, 15) == 40     # the 20-30 gap is too short
+    assert s.next_free(15, 10) == 20     # exact fit in the 20-30 gap
+
+def test_next_free_starts_mid_gap():
+    s = Scheduler()
+    s.book(10, 20); s.book(40, 50)
+    assert s.next_free(25, 5) == 25      # fits in the rest of the gap
+    assert s.next_free(25, 20) == 50     # 25-40 is only 15 long
+EOF
+	sha256sum "$dir/test_booking.py" >"$dir/.protected.sha"
+}
+
+prompt_intervals() {
+	echo "This directory contains test_booking.py, a pytest suite that fully specifies a Scheduler class managing half-open [start, end) time-slot bookings: book(start, end) rejecting any overlap (adjacent slots are fine, invalid intervals raise ValueError), exact-match cancel(start, end), sorted bookings(), and next_free(t, duration) returning the earliest start >= t of a free slot of the given length. Read the tests carefully, then implement booking.py so that 'python -m pytest -q' passes all tests. Do not modify test_booking.py. Re-run the tests and fix your implementation until everything passes."
+}
+
+verify_intervals() {
+	local dir="$1"
+	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
+	[[ -f "$dir/booking.py" ]] || { echo "booking.py not created"; return 1; }
+	scored_pytest "$dir" 120 12 || { echo "pytest failing"; return 1; }
+	return 0
+}
+
+setup_fsm() {
+	local dir="$1"
+	cat >"$dir/test_order.py" <<'EOF'
+# Spec-by-tests: implement order.py with class Order(total_cents) and
+# exception InvalidTransition. States: "new" -> pay(amount) accumulating up
+# to the total -> "paid" -> ship() -> "shipped" -> deliver() -> "delivered".
+# cancel() only from new/paid, returns the refunded amount. A payment that
+# would exceed the total raises ValueError and must not be applied at all.
+# Illegal events raise InvalidTransition and change nothing. o.history is
+# the list of states visited so far (failed events leave no trace).
+import pytest
+from order import Order, InvalidTransition
+
+def test_initial_state():
+    o = Order(total_cents=1000)
+    assert o.state == "new"
+    assert o.history == ["new"]
+
+def test_full_payment_moves_to_paid():
+    o = Order(1000)
+    o.pay(1000)
+    assert o.state == "paid"
+
+def test_partial_payments_accumulate():
+    o = Order(1000)
+    o.pay(300)
+    assert o.state == "new"
+    o.pay(700)
+    assert o.state == "paid"
+
+def test_overpayment_rejected_atomically():
+    o = Order(1000)
+    o.pay(300)
+    with pytest.raises(ValueError):
+        o.pay(800)          # would exceed the total
+    assert o.state == "new"
+    o.pay(700)              # the rejected 800 must NOT have been applied
+    assert o.state == "paid"
+
+def test_ship_requires_paid():
+    o = Order(1000)
+    with pytest.raises(InvalidTransition):
+        o.ship()
+    o.pay(1000)
+    o.ship()
+    assert o.state == "shipped"
+
+def test_deliver_requires_shipped():
+    o = Order(1000)
+    o.pay(1000)
+    with pytest.raises(InvalidTransition):
+        o.deliver()
+    o.ship()
+    o.deliver()
+    assert o.state == "delivered"
+
+def test_pay_after_paid_is_illegal():
+    o = Order(1000)
+    o.pay(1000)
+    with pytest.raises(InvalidTransition):
+        o.pay(1)
+
+def test_cancel_from_new_refunds_nothing():
+    o = Order(1000)
+    assert o.cancel() == 0
+    assert o.state == "cancelled"
+
+def test_cancel_refunds_partial_payment():
+    o = Order(1000)
+    o.pay(400)
+    assert o.cancel() == 400
+
+def test_cancel_from_paid_refunds_total():
+    o = Order(1000)
+    o.pay(1000)
+    assert o.cancel() == 1000
+    assert o.state == "cancelled"
+
+def test_cancel_after_ship_is_illegal():
+    o = Order(1000)
+    o.pay(1000)
+    o.ship()
+    with pytest.raises(InvalidTransition):
+        o.cancel()
+    assert o.state == "shipped"
+
+def test_no_events_after_cancel():
+    o = Order(1000)
+    o.cancel()
+    with pytest.raises(InvalidTransition):
+        o.pay(100)
+    with pytest.raises(InvalidTransition):
+        o.ship()
+
+def test_history_records_states_not_failures():
+    o = Order(1000)
+    with pytest.raises(InvalidTransition):
+        o.ship()
+    o.pay(1000)
+    o.ship()
+    o.deliver()
+    assert o.history == ["new", "paid", "shipped", "delivered"]
+EOF
+	sha256sum "$dir/test_order.py" >"$dir/.protected.sha"
+}
+
+prompt_fsm() {
+	echo "This directory contains test_order.py, a pytest suite that fully specifies an Order workflow state machine: states new/paid/shipped/delivered/cancelled, an accumulating pay(amount) that must atomically reject (ValueError, nothing applied) any payment exceeding the total, guarded ship()/deliver()/cancel() transitions that raise InvalidTransition when illegal and change nothing, cancel() returning the refunded amount, and a history list of visited states in which failed events leave no trace. Read the tests carefully, then implement order.py so that 'python -m pytest -q' passes all tests. Do not modify test_order.py. Re-run the tests and fix your implementation until everything passes."
+}
+
+verify_fsm() {
+	local dir="$1"
+	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
+	[[ -f "$dir/order.py" ]] || { echo "order.py not created"; return 1; }
+	scored_pytest "$dir" 120 13 || { echo "pytest failing"; return 1; }
+	return 0
+}
+
+setup_codec() {
+	local dir="$1"
+	cat >"$dir/test_codec.py" <<'EOF'
+# Spec-by-tests: implement codec.py with encode(frames) and decode(data).
+# Wire format, per frame, frames concatenated:
+#   varint length N (LEB128: little-endian 7-bit groups, high bit = "more")
+#   N payload bytes
+#   1 checksum byte: XOR of all payload bytes (0 for an empty payload)
+# decode must raise ValueError on any malformed input: truncated varint,
+# truncated payload, missing or wrong checksum, dangling trailing bytes.
+import pytest
+from codec import encode, decode
+
+def test_empty_stream():
+    assert encode([]) == b""
+    assert decode(b"") == []
+
+def test_single_short_frame():
+    data = encode([b"AB"])
+    assert data == b"\x02AB\x03"          # len=2, payload, 0x41^0x42=0x03
+    assert decode(data) == [b"AB"]
+
+def test_empty_payload_frame():
+    data = encode([b""])
+    assert data == b"\x00\x00"            # len=0, checksum of nothing = 0
+    assert decode(data) == [b""]
+
+def test_multiple_frames():
+    frames = [b"", b"x", b"hello"]
+    assert decode(encode(frames)) == frames
+
+def test_varint_two_bytes():
+    payload = bytes(200)                  # length 200 needs 2 varint bytes
+    data = encode([payload])
+    assert data[:2] == b"\xc8\x01"        # 200 -> 0xC8 0x01
+    assert data[-1] == 0                  # xor of 200 zero bytes
+    assert decode(data) == [payload]
+
+def test_varint_boundary_127_128():
+    d127 = encode([bytes(127)])
+    assert d127[0] == 0x7F and len(d127) == 1 + 127 + 1
+    d128 = encode([bytes(128)])
+    assert d128[:2] == b"\x80\x01" and len(d128) == 2 + 128 + 1
+
+def test_checksum_xor():
+    data = encode([bytes([0xFF, 0x0F, 0xF0])])
+    assert data[-1] == 0x00               # FF^0F^F0 = 00
+
+def test_roundtrip_binary():
+    frames = [bytes(range(256)), b"\x00\x80\xff"]
+    assert decode(encode(frames)) == frames
+
+def test_bad_checksum_raises():
+    corrupted = bytearray(encode([b"AB"]))
+    corrupted[-1] ^= 0x01
+    with pytest.raises(ValueError):
+        decode(bytes(corrupted))
+
+def test_truncated_payload_raises():
+    with pytest.raises(ValueError):
+        decode(b"\x05AB")                 # promises 5 payload bytes, has 2
+
+def test_truncated_varint_raises():
+    with pytest.raises(ValueError):
+        decode(b"\x80")                   # continuation bit set, no next byte
+
+def test_trailing_garbage_raises():
+    with pytest.raises(ValueError):
+        decode(encode([b"AB"]) + b"\x02") # dangling partial frame
+EOF
+	sha256sum "$dir/test_codec.py" >"$dir/.protected.sha"
+}
+
+prompt_codec() {
+	echo "This directory contains test_codec.py, a pytest suite that fully specifies a small binary frame codec: implement codec.py with encode(frames) taking a list of bytes objects and decode(data) returning that list back. Each frame on the wire is: the payload length as a LEB128 varint (little-endian 7-bit groups, high bit set on all but the last byte), the payload bytes, then one checksum byte equal to the XOR of all payload bytes (0 for an empty payload); frames are simply concatenated. decode must raise ValueError on any malformed input (truncated varint, truncated payload, wrong checksum, dangling trailing bytes). Read the tests carefully — several assert exact byte sequences. Do not modify test_codec.py. Run 'python -m pytest -q' and fix your implementation until all tests pass."
+}
+
+verify_codec() {
+	local dir="$1"
+	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
+	[[ -f "$dir/codec.py" ]] || { echo "codec.py not created"; return 1; }
+	scored_pytest "$dir" 120 12 || { echo "pytest failing"; return 1; }
+	return 0
+}
+
+setup_toposort() {
+	local dir="$1"
+	cat >"$dir/test_toposort.py" <<'EOF'
+# Spec-by-tests: implement toposort.py with
+#   class CycleError(ValueError)
+#   toposort(nodes, edges) -> list
+# edges are (u, v) pairs meaning u must come BEFORE v. Among all valid
+# orders return the LEXICOGRAPHICALLY SMALLEST one (compare node values).
+# Nodes with no edges still appear in the result. An edge naming a node
+# not in `nodes` raises ValueError; any cycle raises CycleError.
+import pytest
+from toposort import toposort, CycleError
+
+def test_linear_chain():
+    assert toposort(["a", "b", "c"], [("a", "b"), ("b", "c")]) == ["a", "b", "c"]
+
+def test_lexicographically_smallest():
+    nodes = ["a", "c", "b", "d"]
+    edges = [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]
+    assert toposort(nodes, edges) == ["a", "b", "c", "d"]
+
+def test_smallest_globally_not_greedy_by_depth():
+    # after "a" both "b" (isolated) and "z" become candidates; "b" wins
+    assert toposort(["z", "b", "a"], [("a", "z")]) == ["a", "b", "z"]
+
+def test_isolated_nodes_included_and_sorted():
+    assert toposort(["b", "a"], []) == ["a", "b"]
+
+def test_duplicate_edges_are_harmless():
+    assert toposort(["a", "b"], [("a", "b"), ("a", "b")]) == ["a", "b"]
+
+def test_larger_deterministic():
+    nodes = ["t3", "t1", "t2", "s", "u"]
+    edges = [("s", "t1"), ("s", "t2"), ("s", "t3"),
+             ("t1", "u"), ("t2", "u"), ("t3", "u")]
+    assert toposort(nodes, edges) == ["s", "t1", "t2", "t3", "u"]
+
+def test_self_loop_is_cycle():
+    with pytest.raises(CycleError):
+        toposort(["a"], [("a", "a")])
+
+def test_two_node_cycle():
+    with pytest.raises(CycleError):
+        toposort(["a", "b"], [("a", "b"), ("b", "a")])
+
+def test_cycle_with_acyclic_tail_still_raises():
+    with pytest.raises(CycleError):
+        toposort(["a", "b", "d"], [("a", "b"), ("b", "a"), ("b", "d")])
+
+def test_cycle_error_is_a_value_error():
+    assert issubclass(CycleError, ValueError)
+
+def test_unknown_node_in_edge_raises():
+    with pytest.raises(ValueError):
+        toposort(["a"], [("a", "ghost")])
+EOF
+	sha256sum "$dir/test_toposort.py" >"$dir/.protected.sha"
+}
+
+prompt_toposort() {
+	echo "This directory contains test_toposort.py, a pytest suite that fully specifies a deterministic topological sort: implement toposort.py with a function toposort(nodes, edges) and an exception class CycleError deriving from ValueError. Edges are (u, v) pairs meaning u must come before v. Among all valid topological orders you must return the lexicographically smallest one; think carefully about what data structure makes the smallest ready node come out first. Isolated nodes appear in the result too; an edge naming an unknown node raises ValueError; any cycle (including a self-loop) raises CycleError. Do not modify test_toposort.py. Run 'python -m pytest -q' and fix your implementation until all tests pass."
+}
+
+verify_toposort() {
+	local dir="$1"
+	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
+	[[ -f "$dir/toposort.py" ]] || { echo "toposort.py not created"; return 1; }
+	scored_pytest "$dir" 120 11 || { echo "pytest failing"; return 1; }
 	return 0
 }
 
@@ -362,7 +774,7 @@ verify_template() {
 	local dir="$1"
 	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
 	[[ -f "$dir/template.py" ]] || { echo "template.py not created"; return 1; }
-	(cd "$dir" && python -m pytest -q >/dev/null 2>&1) || { echo "pytest failing"; return 1; }
+	scored_pytest "$dir" 120 10 || { echo "pytest failing"; return 1; }
 	return 0
 }
 
@@ -447,7 +859,7 @@ verify_interp() {
 		sys.exit(1 if bad else 0)
 	PY
 	) || { echo "used eval/exec/compile"; return 1; }
-	(cd "$dir" && python -m pytest -q >/dev/null 2>&1) || { echo "pytest failing"; return 1; }
+	scored_pytest "$dir" 120 13 || { echo "pytest failing"; return 1; }
 	return 0
 }
 
@@ -528,7 +940,7 @@ verify_perf() {
 	local dir="$1"
 	(cd "$dir" && sha256sum -c .protected.sha >/dev/null 2>&1) || { echo "protected test file modified"; return 1; }
 	[[ -f "$dir/eventlog.py" ]] || { echo "eventlog.py not created"; return 1; }
-	(cd "$dir" && timeout 120 python -m pytest -q >/dev/null 2>&1) || { echo "pytest failing or over budget"; return 1; }
+	scored_pytest "$dir" 120 6 || { echo "pytest failing or over budget"; return 1; }
 	return 0
 }
 
@@ -647,7 +1059,7 @@ verify_regex() {
 		sys.exit(1 if bad else 0)
 	PY
 	) || { echo "used re/regex/importlib"; return 1; }
-	(cd "$dir" && timeout 60 python -m pytest -q >/dev/null 2>&1) || { echo "pytest failing"; return 1; }
+	scored_pytest "$dir" 60 14 || { echo "pytest failing"; return 1; }
 	return 0
 }
 
@@ -679,7 +1091,7 @@ switch_model() {
 RESULTS=()
 
 run_task() {
-	local model="$1" task="$2" dir rc=0 start dur verdict reason=""
+	local model="$1" task="$2" dir rc=0 start dur verdict reason="" score=""
 	dir="$WORKROOT/$model/$task"
 	rm -rf "$dir" && mkdir -p "$dir"
 	"setup_$task" "$dir"
@@ -691,23 +1103,27 @@ run_task() {
 	dur=$(( $(date +%s) - start ))
 	if [[ $rc -eq 124 ]]; then
 		verdict="TIMEOUT"
+		# score whatever the agent left behind at the cutoff (a 13/14
+		# TIMEOUT and an empty directory are very different failures)
+		("verify_$task" "$dir" >/dev/null 2>&1) || true
 	elif reason=$("verify_$task" "$dir"); then
 		verdict="PASS"
 	else
 		verdict="FAIL"
 	fi
-	echo "=== [$model/$task] $verdict (${dur}s) ${reason:+— $reason}"
-	RESULTS+=("$model|$task|$verdict|${dur}s|$reason")
+	score=$(cat "$dir/.score" 2>/dev/null) || true
+	echo "=== [$model/$task] $verdict (${dur}s) ${score:+[$score] }${reason:+— $reason}"
+	RESULTS+=("$model|$task|$verdict|${score:--}|${dur}s|$reason")
 }
 
 summary() {
 	local r
 	echo
 	echo "==================== SUMMARY ===================="
-	printf '%-14s %-9s %-8s %-7s %s\n' "MODEL" "TASK" "VERDICT" "TIME" "NOTE"
+	printf '%-14s %-10s %-8s %-13s %-7s %s\n' "MODEL" "TASK" "VERDICT" "SCORE" "TIME" "NOTE"
 	for r in "${RESULTS[@]}"; do
-		IFS='|' read -r m t v d n <<<"$r"
-		printf '%-14s %-9s %-8s %-7s %s\n' "$m" "$t" "$v" "$d" "$n"
+		IFS='|' read -r m t v s d n <<<"$r"
+		printf '%-14s %-10s %-8s %-13s %-7s %s\n' "$m" "$t" "$v" "$s" "$d" "$n"
 	done
 }
 

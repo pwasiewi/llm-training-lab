@@ -24,11 +24,18 @@ with MoE CPU/GPU hybrid offload tuned for 16 GB VRAM (RTX 5070 Ti) + 64 GB RAM.
   split (`ollama ps`). Ollama has no `--n-cpu-moe` equivalent; quantifying
   that gap is the point of this script.
 - `bench_05` measures capability, not throughput: it drives headless qwen-code
-  (`--approval-mode yolo`) against each aillama profile on three coding tasks
-  of increasing difficulty (pytest bugfix → CLI tool from scratch → implement
-  an LRU+TTL cache from a provided test suite). Verdicts are objective:
-  protected-file checksums plus the script's own pytest/functional checks —
-  the agent's claims and self-written tests are never trusted.
+  (`--approval-mode yolo`) against each aillama profile on ten coding tasks
+  of increasing difficulty — an easy tier (pytest bugfix, CLI tool from
+  scratch, LRU+TTL cache, three-bug multifile hunt), a mid tier (interval
+  Scheduler with free-slot search, Order state machine with guarded
+  transitions), and a parser/compiler tier (template engine, expression
+  interpreter, EventLog under a perf budget, backtracking regex engine).
+  Verdicts are objective: protected-file checksums plus the script's own
+  pytest/functional checks — the agent's claims and self-written tests are
+  never trusted. Since 2026-07-14 every verdict carries a **SCORE** column
+  (`passed/total (pct%)`); TIMEOUT is scored on whatever the agent left
+  behind at the cutoff, so a 13/14 near-miss is distinguishable from an
+  empty directory.
 - `bench_04` replaces the `--n-cpu-moe` axis (meaningless for a dense model
   that fits fully in VRAM) with: a context-depth sweep (`-d 0,16384,65536,131072`
   — Gated-DeltaNet linear-attention pp scaling), a real server request at 128K
@@ -112,6 +119,632 @@ will write large blobs back under `/home`.
 Flags: `-k` keeps the daemon running after the test (by default the script
 stops the daemon only if it started it). The GGUF import creates a blob copy
 (~model size) under `OLLAMA_MODELS`; remove with `ollama rm glm47-flash-q4`.
+
+## Reference results — 2026-07-14: gpt-oss-20b quant/finetune variants (MXFP4-Aggressive vs F16 vs HERETIC)
+
+Three GGUFs of the same base model (OpenAI gpt-oss-20b, MoE 20.91B params,
+36 layers), full `bench_05` 10-task suite, `TASK_TIMEOUT=900`, run
+back-to-back on one `aillama switch` chain so page-cache state is
+comparable:
+
+- `gpt-oss20b` — HauhauCS Uncensored-Aggressive, native MXFP4, 11.27 GiB.
+  Fits fully in VRAM at 131072 ctx, no `--n-cpu-moe` (existing profile).
+- `gpt-oss20b-f16` — unsloth F16, 12.83 GiB (non-MoE tensors upcast to F16,
+  MoE experts stay native precision). Does **not** fit fully at 131072 ctx:
+  floor `--n-cpu-moe 2` (`1` OOMs the compute buffer), 15.4/16.3 GiB.
+- `gpt-oss20b-heretic` — DavidAU HERETIC-uncensored NEO-Imatrix finetune,
+  IQ4_NL, 12.6 GiB. Also doesn't fit fully: floor `--n-cpu-moe 1` (`0`
+  OOMs), profile set to `2` for the same margin as `-f16`.
+
+| Task | gpt-oss20b (MXFP4) | gpt-oss20b-f16 | gpt-oss20b-heretic |
+|------|---------------------|-----------------|----------------------|
+| bugfix | PASS 4/4 (100%) 12s | PASS 4/4 (100%) 21s | PASS 4/4 (100%) 18s |
+| scratch | PASS 4/4 (100%) 14s | PASS 4/4 (100%) 33s | PASS 4/4 (100%) 42s |
+| lru | PASS 8/8 (100%) 18s | PASS 8/8 (100%) 52s | PASS 8/8 (100%) 62s |
+| multifile | PASS 5/5 (100%) 16s | PASS 5/5 (100%) 32s | PASS 5/5 (100%) 43s |
+| intervals | PASS 12/12 (100%) 13s | PASS 12/12 (100%) 25s | PASS 12/12 (100%) 38s |
+| fsm | PASS 13/13 (100%) 47s | PASS 13/13 (100%) 25s | PASS 13/13 (100%) 334s |
+| template | PASS 10/10 (100%) 40s | PASS 10/10 (100%) 214s | **FAIL 4/10 (40%)** 147s |
+| interp | **FAIL — used eval/exec/compile** 37s | **PASS 13/13 (100%)** 350s | **FAIL 0/13 (0%)** 197s |
+| perf | PASS 6/6 (100%) 55s | PASS 6/6 (100%) 39s | PASS 6/6 (100%) 31s |
+| regex | PASS 14/14 (100%) 73s | **FAIL 6/14 (42%)** 222s | **FAIL — used re/regex/importlib** 40s |
+| **verdicts** | **9/10** | **9/10** | **6/10** |
+
+Easy+mid tier (6 tasks: bugfix/scratch/lru/multifile/intervals/fsm) is a
+clean sweep for all three — still not discriminating at this capability
+level, same pattern as every other strong-model pairing in this file.
+
+**`gpt-oss20b-f16` fixed the MXFP4 quant's `interp` failure but broke
+`regex`.** The MXFP4 baseline disqualified itself on `interp` by calling
+banned builtins (`eval`/`exec`/`compile`) — a genuine capability/judgment
+gap, not a close call. F16 solved the same task cleanly, 13/13, at the
+cost of 350s (vs 37s to fail) — plausible that the extra precision on
+attention/embedding tensors changed the model's judgment about which
+approach to reach for. But F16 then regressed on `regex` (6/14, 42%) where
+the MXFP4 quant went 14/14 clean. Net effect on this run: a wash in verdict
+count (9/10 both) with the failures swapped to different tasks — not a
+clear win for the bigger file, matching the standing lesson elsewhere in
+this doc ("bigger file ≠ better," Q5_K_M/UD-Q4_K_XL entries above) but this
+time with an offsetting win rather than a pure regression.
+
+**`gpt-oss20b-heretic` is clearly the weakest of the three** — the only one
+to fail the parser tier twice outright (`template` 4/10, `interp` 0/13) plus
+disqualify itself on `regex` by importing a banned module (`re`/`regex`/
+`importlib` — reaching for the standard library instead of implementing the
+engine, the opposite failure mode from MXFP4's `interp` eval/exec use, but
+the same category: shortcut instead of engineering). Also the slowest
+wall-clock model in the trio on `fsm` (334s vs 25–47s) with no accuracy
+payoff. The IQ4_NL quantization plus whatever the HERETIC finetune changed
+did not help agentic coding capability on this hardware — no reason to
+prefer it over the existing MXFP4-Aggressive profile.
+
+**Verdict:** keep `gpt-oss20b` (MXFP4-Aggressive) as the default fast-tier
+profile — it fits fully in VRAM (no `--n-cpu-moe`, fastest wall-clock by a
+wide margin on every task) and its only failure is a known, narrow gap.
+`gpt-oss20b-f16` is a reasonable fallback if a future task specifically
+needs `interp`-style capability and can tolerate ~2-6x slower generation
+from partial CPU offload. `gpt-oss20b-heretic` has no identified use case
+so far; kept in `models.conf` for reference but not recommended.
+
+## bench_05 changes — 2026-07-14 (evening): two fast trap-dense tasks (codec, toposort)
+
+Motivation: the easy+mid tier (6 tasks) no longer discriminates strong
+models at all, and the parser tier (template/interp/regex) discriminates
+at the cost of 150–900 s per task *and* demonstrated run-to-run sampling
+noise (see the Q8_0 section below and Ornith's regex saga). What was
+missing: tasks that are **hard in reasoning but small in code** — solved
+in well under two minutes by a capable model, failed on precise edge
+cases (not on time) by a weaker one. Two new capability axes no existing
+task touches:
+
+- **`codec`** (12 tests) — binary frame codec: LEB128 varint length +
+  payload + XOR checksum; `decode` must raise on truncated varint,
+  truncated payload, bad checksum, dangling bytes. Several tests assert
+  exact byte literals (`b"\x02AB\x03"`, `b"\xc8\x01"`). Byte/bit-level
+  reasoning is exactly where quantization damage tends to show first.
+- **`toposort`** (11 tests) — deterministic topological sort returning
+  the lexicographically smallest valid order + `CycleError(ValueError)`.
+  The determinism requirement is the trap: naive FIFO Kahn passes only
+  9/11 (verified against a deliberately naive implementation); a correct
+  solution needs a heap over the ready set. Graph reasoning + exception
+  hierarchy in ~30 lines.
+
+Both oracle-verified before use (reference solutions pass 12/12 and
+11/11 through the script's own `setup_*`/`verify_*` path). Inserted into
+the default `TASKS` between `fsm` and `template`.
+
+First validation run (`TASKS=codec,toposort`,
+`MODELS=gpt-oss20b,gpt-oss20b-q8_0`): all four cells clean PASS at 100%,
+12–24 s each. So for the gpt-oss-20b capability class these two land in
+the non-discriminating mid tier alongside intervals/fsm — they did NOT
+separate MXFP4 from Q8_0, and gave no signal on the "was Q8_0's 9/10
+lucky" question. They stay in the default set anyway: ~1 min of total
+wall-clock per model buys coverage of two previously untested axes, and
+like intervals/fsm they should start separating once capability drops
+(weaker quants, smaller models) — that's where quantization damage on
+byte-level reasoning would show. The top-tier discriminator remains the
+parser tier, and given its demonstrated sampling noise, repeated runs
+are the only honest way to rank models there.
+
+**Comparability boundary #2: verdicts before this change are out of 10
+tasks, after it out of 12.** (Boundary #1 was 8→10 earlier the same day —
+see "pass-ratio SCORE + two mid-tier tasks" below.) Don't compare raw
+verdict counts across either line.
+
+## Reference results — 2026-07-14: gpt-oss-20b Q8_0 added — best of the small-file class, but baseline is noisier than first thought
+
+Follow-up to the MXFP4/F16/HERETIC comparison above. The size table for
+unsloth's `gpt-oss-20b-GGUF` repo is nearly flat from Q2_K (11.5 GB) to
+Q8_0 (12.1 GB) — confirms the pattern already seen with F16/MXFP4: gpt-oss
+keeps MoE expert tensors at native ~4-bit precision regardless of quant
+label, only non-expert tensors (attention/embeddings/norms) actually
+change size. Only `UD-Q8_K_XL` (13.2 GB) and `F16` (13.8 GB) break that
+flat pattern. Picked `Q8_0` (12.11 GiB) as the best quality available
+while still staying close to the already-fitting MXFP4-Aggressive
+footprint (12.10 GB decimal — nearly identical file size).
+
+Boot-tested at `-ngl 99 -c 131072`, no `--n-cpu-moe`: **fits fully**,
+15.0/16.3 GiB — same class as MXFP4-Aggressive, unlike F16/HERETIC which
+both needed CPU offload. Added as profile `gpt-oss20b-q8_0`.
+
+`bench_05` vs `gpt-oss20b` (MXFP4-Aggressive), same-day re-run:
+
+| Task | gpt-oss20b (this run) | gpt-oss20b-q8_0 |
+|------|------------------------|-------------------|
+| bugfix | PASS 4/4 (100%) 10s | PASS 4/4 (100%) 9s |
+| scratch | PASS 5/5 (100%) 18s | PASS 4/4 (100%) 32s |
+| lru | PASS 8/8 (100%) 21s | PASS 8/8 (100%) 20s |
+| multifile | PASS 5/5 (100%) 19s | PASS 5/5 (100%) 21s |
+| intervals | PASS 12/12 (100%) 14s | PASS 12/12 (100%) 15s |
+| fsm | PASS 13/13 (100%) 48s | PASS 13/13 (100%) 15s |
+| template | **FAIL 1/10 (10%)** 51s | PASS 10/10 (100%) 23s |
+| interp | **FAIL 0/13 (0%)** 154s | PASS 13/13 (100%) 163s |
+| perf | PASS 6/6 (100%) 49s | PASS 6/6 (100%) 24s |
+| regex | PASS 14/14 (100%) 148s | FAIL 11/14 (78%) 100s |
+| **verdicts** | **7/10** | **9/10** |
+
+**The MXFP4 baseline is noisier than the earlier same-day run suggested.**
+Three runs of `gpt-oss20b` today: 9/10 (`interp` FAIL via banned
+eval/exec), 9/10 again isn't quite right — the *comparison* run against
+f16/heretic gave 9/10 with `interp` FAIL, now this run gives **7/10** with
+*different* tasks failing entirely (`template` 1/10, `interp` 0/13, and
+`regex` flipped from FAIL→PASS). Same weights, same quant, same profile,
+zero code changes between runs — this is sampling non-determinism on the
+same scale already logged for Ornith's `regex` task
+([[feedback-ncmoe-probe-order]] territory: measure repeatedly, don't trust
+one run). **Do not read the `gpt-oss20b` column above as a regression** —
+treat both 7/10 and 9/10 as within its normal noise band until more runs
+accumulate.
+
+`gpt-oss20b-q8_0`'s own result stands on its own regardless: **9/10**,
+clean sweep through `perf`, only a near-miss on `regex` (11/14, 78% — not
+a disqualification like HERETIC's banned-import FAIL). Wall-clock is
+dramatically faster than `gpt-oss20b-f16` on every shared task (`interp`
+163s vs 350s, `template` 23s vs 214s, `regex` 100s vs 222s) because it
+needs zero CPU offload — same VRAM-fit class as the MXFP4 baseline, so no
+speed penalty for the quality gain.
+
+**Verdict: `gpt-oss20b-q8_0` looks like the strongest of the four
+gpt-oss-20b variants tested today** — fits fully in VRAM like the MXFP4
+baseline (no wall-clock penalty), and its one failure is a near-miss
+rather than a disqualification. Worth promoting over `gpt-oss20b` as the
+default fast-tier profile, but given the baseline's demonstrated run-to-run
+noise, treat this as a lead, not a settled verdict, until `gpt-oss20b-q8_0`
+itself gets a repeat run.
+
+### Repeat run (same day, later): `MODELS=gpt-oss20b,gpt-oss20b-q8_0 TASKS=template,interp,regex`
+
+The repeat this section called for. Parser-tier only (3/10 tasks):
+
+| Task | gpt-oss20b (MXFP4) | gpt-oss20b-q8_0 |
+|------|---------------------|-------------------|
+| template | FAIL 8/10 (80%) 157s | PASS 10/10 (100%) 47s |
+| interp | FAIL — used eval/exec/compile — 128s | PASS 13/13 (100%) 67s |
+| regex | FAIL 12/14 (85%) 255s | FAIL 13/14 (92%) 271s |
+
+`gpt-oss20b-q8_0` reproduced its exact `template`/`interp` clean-PASS result
+from the first run and improved its `regex` near-miss (78%→92%). `gpt-oss20b`
+(MXFP4) failed all three parser tasks this time, including a `regex` result
+that flipped from a clean 14/14 (first run) to FAIL 12/14 — the baseline's
+noise now covers *every* parser task, never a clean sweep across two runs.
+
+**Verdict confirmed: `gpt-oss20b-q8_0` promoted to the default fast-tier
+profile**, superseding `gpt-oss20b` (MXFP4-Aggressive). Across two runs
+q8_0 never failed to pass `template`/`interp` and only ever near-missed
+`regex`; MXFP4 has never passed `template` or `interp` and lost its one
+`regex` clean sweep on the repeat. Same VRAM-fit class, same wall-clock
+tier — no cost to the switch. MXFP4 profile kept in `models.conf` as a
+fallback/reference, not recommended for new work.
+
+## Reference results — 2026-07-14: gpt-oss20b vs Ornith-1.0-9B (new small Ornith)
+
+`deepreinforce-ai/Ornith-1.0-9B-GGUF` (Q8_0, 9.53 GiB, arch `qwen35` dense,
+32 layers — smaller sibling of the RL-agentic `ornith-1.0-35b` used
+throughout this file). Boots fine at full `-ngl 99 -c 131072`, no
+`--n-cpu-moe` needed (same "fits whole" class as Qwythos/dsv4flash).
+Added as aillama profile `ornith-9b`. `bench_05` run right after aborting
+the Gemma4 session, paired with `gpt-oss20b` per user's request (fast-tier
+comparison, not the 35B-class ornith-128k):
+
+| Task | gpt-oss20b | ornith-9b |
+|------|-----------|-----------|
+| bugfix | PASS 4/4 (100%) 9s | PASS 4/4 (100%) 19s |
+| scratch | PASS 4/4 (100%) 64s | PASS 8/8 (100%) 69s |
+| lru | PASS 8/8 (100%) 24s | PASS 8/8 (100%) 36s |
+| multifile | PASS 5/5 (100%) 59s | PASS 5/5 (100%) 31s |
+| intervals | PASS 12/12 (100%) 46s | PASS 12/12 (100%) 40s |
+| fsm | PASS 13/13 (100%) 50s | PASS 13/13 (100%) 33s |
+| template | PASS 10/10 (100%) 60s | **TIMEOUT 3/10 (30%)** 900s |
+| interp | FAIL 9/13 (69%) 63s | **TIMEOUT 12/13 (92%)** 900s |
+| perf | **TIMEOUT 0/6 (0%)** 900s | **TIMEOUT 0/6 (0%)** 900s |
+| regex | FAIL 9/14 (64%) 716s | **TIMEOUT 2/14 (14%)** 900s |
+| **verdicts** | **7/10** | **6/10** |
+
+Both easy+mid tiers (6 tasks) are a clean sweep for both models — the new
+`intervals`/`fsm` tasks still aren't discriminating this pair, same as the
+07-14 gemma4-fable5 run (fsm/intervals only start separating models once
+capability drops much further, e.g. gemma4-qat's stream-hang or a weaker
+9B).
+
+**perf: both models scored a hard 0/6, for two unrelated reasons** — dug
+out of the generated code rather than left as opaque TIMEOUTs:
+
+- `gpt-oss20b` wrote a Fenwick tree (the right data structure — same
+  approach it used in an earlier successful run) but with a genuine
+  initialization bug: `_ensure_size()` grows the backing array by doubling
+  from `self._max` instead of `self._size`, and `_max` starts at `0` for
+  the default (no-arg) constructor — `0 << 1` is `0` forever, so the loop
+  never terminates. Every `add()` call hangs the process. Bad luck on
+  sampling, not a repeat of a known capability gap — the model solved this
+  exact task cleanly (PASS, 25s, correct Fenwick tree) earlier today.
+- `ornith-9b` used `self._keys.insert(pos, ...)` — a sorted-list insertion,
+  the *exact anti-pattern the prompt explicitly warns against* — giving
+  O(N) per add and O(N²) total across 400K adds, genuinely too slow to
+  finish, not a bug. This is a real regression vs. the 35B `ornith-128k`,
+  which built a proper Fenwick tree on the same task with 10× time-budget
+  margin (07-12 tiebreak round, see below) — the smaller RL-tuned model
+  didn't transfer that engineering judgment down to 9B.
+
+**template/interp/regex: ornith-9b is dramatically slower, but scoring
+shows genuine partial progress, not stalls** — `interp` in particular is a
+striking near-miss: **12/13 (92%)** at the 900s cutoff, i.e. one bug away
+from a clean pass, just like `ornith-128k`'s recurring near-misses on
+`regex` elsewhere in this file. The 9B model is clearly using the same
+RL-trained "keep iterating until tests pass" strategy as its 35B parent,
+it just needs more wall-clock per task at this size — `TASK_TIMEOUT=1200`
+(the standard bump used for `interp`/`perf`-tier tasks on the 35B) is worth
+a retry before writing off `ornith-9b` on the parser tier.
+
+**Verdict:** `gpt-oss20b` still wins on verdict count (7/10 vs 6/10) and is
+dramatically faster wall-clock everywhere except its own perf bug, but the
+comparison is muddied by one-off failures on both sides (a bug, not a
+capability gap, for gpt-oss20b's perf; a near-miss under time pressure, not
+a wall, for ornith-9b's template/interp/regex). `ornith-9b` is worth a
+second run at `TASK_TIMEOUT=1200` for the three timeout tasks before
+concluding anything about its ceiling relative to `gpt-oss20b` — on this
+run alone it looks like the RL-agentic training transfers to 9B scale, just
+slower.
+
+## Reference results — 2026-07-14: Gemma4-12B candidates — both rejected
+
+New arch `gemma4` (dense, 48 layers, hybrid local/global attention like
+gemma3), llama.cpp 9988 — confirmed loadable, not a compat problem. Two
+variants pulled: `yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2`
+(Q8_0, 12.7 GiB, claims an agentic finetune) and
+`HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced` (Q4_K_M, 7.38 GiB,
+usual uncensored-finetune family). Boot floors: `gemma4-fable5` OOMs the
+compute buffer at 131072 ctx, 65536 is razor-thin (~960 MiB free, boots
+inconsistently — one clean boot, one OOM under bench_06's server test with
+nothing else running), 32768 is the only *reliable* ceiling; `gemma4-qat`
+has much more margin (11.0/16.3 GiB at full 131072 ctx).
+
+`bench_06_dense_generic.sh` throughput (both healthy at pp/tg, no red
+flags): `gemma4-qat` pp 3827→1105 / tg 84.3→64.6 tok/s (depth 0→131072);
+`gemma4-fable5` pp 4203→3178 / tg 53.3→50.9 tok/s (depth 0→16384, 65536
+sweep point OOM'd). Real-request `/completion` test on `gemma4-fable5`
+produced `gen_n=1` (model emits EOS almost immediately on raw non-chat
+continuation of filler text) — a red flag for an "agentic" finetune, though
+not necessarily disqualifying since real usage goes through the chat
+template (see bench_05 below, which does use the chat template and still
+failed).
+
+**bench_05 agentic (interrupted mid-run, `MODELS=gemma4-fable5,gemma4-qat,gpt-oss20b`
+— stopped by user judgement before finishing, gpt-oss20b never ran):**
+
+| Task | gemma4-fable5 | gemma4-qat |
+|------|---------------|------------|
+| bugfix | PASS 4/4 (100%) 80s | PASS 4/4 (100%) 29s |
+| scratch | FAIL 0/2 (0%) 350s | **FAIL (stream hang) 266s** |
+| lru | FAIL 9/10 (90%) 196s | **FAIL (stream hang) 267s** |
+| multifile | PASS 5/5 (100%) 101s | **FAIL (stream hang) 267s** |
+| intervals | PASS 12/12 (100%) 57s | **FAIL (stream hang) 270s** |
+| fsm | PASS 13/13 (100%) 86s | **FAIL (stream hang) 346s** |
+| template | FAIL 4/10 (40%) 280s | **FAIL (stream hang) 271s** |
+| interp | FAIL 1/13 (7%) 568s | not reached (killed) |
+| perf | PASS 6/6 (100%) 161s | not reached |
+| regex | FAIL 0/14 (0%) 453s | not reached |
+| **verdicts** | **5/10** | **1/6 completed** |
+
+`gemma4-qat` is disqualifying on infrastructure grounds, not capability:
+every task after `bugfix` hit the identical client-side error —
+`[API Error: No stream activity for 240000ms after N chunks (stream
+lifetime: ~250-320s)]` — at wildly different chunk counts (231 to 5906),
+meaning the model reliably drops into a dead/looping generation state
+partway through *every* agentic task regardless of task shape or how far
+along it was. 100% reproducible across 5/5 completed non-trivial tasks.
+Not a timeout-budget problem (extending `TASK_TIMEOUT` would not help — the
+stream is dead, not slow) and not this bench's harness (`gpt-oss20b` and
+every other profile stream fine on the same qwen-code/llama.cpp stack).
+
+`gemma4-fable5` at least produces results, but they're weak for a
+same-class-size comparison — 5/10 verdicts, with two near-total capability
+failures (`interp` 1/13, `regex` 0/14) worse than 9B `dsv4flash` (which at
+least got partial credit) and no better than 20B `gpt-oss20b` despite being
+in the same 12B weight class with a claimed "agentic" finetune. Combined
+with the degenerate raw-completion behavior and the unreliable 65536 ctx
+boot, not worth pursuing further.
+
+**Verdict: both Gemma4-12B variants rejected.** `gemma4-qat` is unusable
+for agentic work (stream-hang bug, not a capability question — worth a
+quick check if it reproduces with `--jinja` off or a different chat
+template, but not worth spending more bench time on before that). No
+further testing planned unless the stream-hang is root-caused; `gemma4-fable5`
+would need a second, less generous look only if the hang turns out to be
+template-specific (i.e. affects fable5 too and was suppressing its true
+capability) — on the numbers gathered here alone it doesn't beat the
+existing fleet.
+
+## bench_05 changes — 2026-07-14: pass-ratio SCORE + two mid-tier tasks
+
+Two gaps showed up in the 07-14 sessions:
+
+1. **Bare FAIL hides the margin.** `dsv4flash` and `gpt-oss20b` both scored
+   5/8 verdicts, but on `interp` dsv4flash passed **0/13** tests (parser
+   non-functional) while gpt-oss20b passed **10/13** (one operator bug) —
+   the summary table showed the identical `FAIL`. Partial results had to be
+   dug out of pytest logs by hand. Fix: `scored_pytest()` in
+   `bench_05_agentic.sh` now records `passed/total (pct%)` for every task
+   in a SCORE column; TIMEOUT verdicts run the verifier anyway and score
+   the work-in-progress at cutoff (ornith's recurring "TIMEOUT but 13/14 on
+   regex" is now visible without manual inspection).
+2. **Difficulty was bimodal.** Five easy tasks (nearly every model passes,
+   including 9Bs) and three parser-class tasks (small models fail
+   wholesale) — nothing in between, so mid-size models separated only via
+   anecdote. Two mid-tier tasks added, both oracle-verified against
+   reference implementations before use (12/12, 13/13):
+   - `intervals` — booking `Scheduler`: half-open `[start, end)` overlap
+     rejection (adjacency allowed), exact-match cancel, earliest-free-slot
+     search (`next_free(t, duration)` incl. exact-fit gaps). Algorithmic
+     mid-tier: sorted-interval reasoning without a full parser.
+   - `fsm` — `Order` state machine: guarded transitions raising
+     `InvalidTransition`, accumulating `pay()` with *atomic* overpay
+     rejection (`ValueError`, nothing applied), refunds from `cancel()`,
+     state history that failed events must not touch. Spec-fidelity
+     mid-tier — exactly where glm-flash-class models slipped (declare
+     success after one weak pass).
+
+Default `TASKS` is now 10 entries (`...multifile,intervals,fsm,template...`);
+verdict totals in tables **before this section are out of 8**, later runs
+are out of 10 — don't compare the raw counts across that boundary.
+
+## Reference results — 2026-07-14: gpt-oss20b vs ornith-128k, full 10-task suite (first SCORE run)
+
+First run of the expanded 10-task `bench_05` (adds `intervals`, `fsm`) with
+the new SCORE column, `MODELS=gpt-oss20b,ornith-128k`, `TASK_TIMEOUT=900`.
+
+| Task | gpt-oss20b | ornith-128k |
+|------|-----------|-------------|
+| bugfix | PASS 4/4 (100%) 10s | PASS 4/4 (100%) 89s |
+| scratch | PASS 4/4 (100%) 29s | PASS 5/5 (100%) 114s |
+| lru | PASS 8/8 (100%) 24s | PASS 8/8 (100%) 142s |
+| multifile | PASS 5/5 (100%) 21s | PASS 5/5 (100%) 150s |
+| intervals | PASS 12/12 (100%) 13s | PASS 12/12 (100%) 117s |
+| fsm | PASS 13/13 (100%) 46s | PASS 13/13 (100%) 89s |
+| template | PASS 10/10 (100%) 79s | PASS 10/10 (100%) 230s |
+| interp | **FAIL 11/13 (84%)** 142s | PASS 13/13 (100%) 470s |
+| perf | PASS 6/6 (100%) 49s | PASS 6/6 (100%) 240s |
+| regex | **FAIL 8/14 (57%)** 201s | **TIMEOUT 0/14 (0%)** 900s |
+| **verdicts** | **8/10** | **9/10** |
+
+New mid-tier tasks (`intervals`, `fsm`) did **not** separate these two
+models at all — both 100% in well under a minute (gpt-oss20b) or a few
+minutes (ornith). They're doing their job as an easy/hard midpoint, just
+not the axis that splits *this* pair; expect them to matter more against
+weaker models (dsv4flash, glm-flash) where spec-fidelity was the failure
+mode.
+
+The SCORE column earns its keep on `interp`: gpt-oss20b's FAIL is now
+visibly a near-miss (11/13, one operator bug) rather than indistinguishable
+from a wholesale failure — consistent with the 07-14 dsv4flash comparison
+where an "equivalent" FAIL was 0/13.
+
+**Fifth regex data point for ornith-128k, and a new failure mode.** Unlike
+the prior three TIMEOUTs (all "stuck retrying the same last unfixed case",
+scoring 13/14 or 0/14-with-visible-progress), this run's killed `rx.py`
+(328 lines, clearly mid-edit) scores a hard **0/14**: `count_groups()`
+references a helper class `_Seq` that is never defined anywhere in the
+file — the model was mid-rename/refactor of its AST node classes when the
+900s SIGTERM landed, leaving the whole module non-importable-in-context
+(a bare `NameError`, not a logic gap). Running tally across sessions:
+PASS 225s (lucky) / FAIL 2122s 13/14 (07-13) / TIMEOUT 900s 13/14-in-progress
+(07-14) / TIMEOUT 1200s 13/14 (07-14 retest) / **TIMEOUT 900s 0/14, broken
+mid-refactor (07-14, this run)**. Confirms the earlier conclusion harder:
+ornith's regex task duration/outcome is genuinely non-deterministic
+per-session, now with two distinct failure shapes (near-miss stall vs.
+mid-refactor crash) rather than one.
+
+**Verdict:** gpt-oss20b's speed advantage holds (all easy+mid tasks in
+under 50s vs ornith's 1–4 min) with one fewer verdict (8/10 vs 9/10) on
+this run — still the best speed/capability tradeoff for iteration, still
+not a drop-in for `ornith-128k` on the parser tier when correctness matters
+most.
+
+## Reference results — 2026-07-14: official unsloth Qwen3.6-35B-A3B-GGUF vs Ornith
+
+Three quant variants of the **official** `unsloth/Qwen3.6-35B-A3B-GGUF`
+(distinct from the `HauhauCS` uncensored fork used by the `qwen36*`
+profiles) downloaded to compare against `ornith-128k`. `--n-cpu-moe` floors
+via `bench_01 -b` sweep (descending probe, ~1.8 GB desktop VRAM in use):
+
+| Variant | weight size | ncmoe floor | tg @ floor |
+|---|---|---|---|
+| UD-IQ4_XS | 16.50 GiB | 10 | 96.6 tok/s |
+| MXFP4_MOE | 20.21 GiB | 16 | 68.1 tok/s |
+| UD-Q4_K_XL | 20.81 GiB | 17 | 63.0 tok/s |
+
+Profiles added to `~/.aillama/models.conf` as `qwen36u-{iq4xs,mxfp4,q4kxl}[-128k]`
+(floor+2 @32K, floor+6/7 @128K, same margin convention as `ornith`).
+
+### Agentic (bench_05), 128K profiles, TASK_TIMEOUT=900s
+
+| Task | qwen36u-iq4xs | qwen36u-mxfp4 | qwen36u-q4kxl | ornith-128k |
+|------|---------------|---------------|---------------|-------------|
+| bugfix | PASS 57s | PASS 87s | PASS 90s | PASS 90s |
+| scratch | **FAIL** 137s (file not created) | PASS 121s | PASS 95s | PASS 129s |
+| lru | PASS 90s | PASS 142s | PASS 92s | PASS 87s |
+| multifile | PASS 70s | PASS 118s | PASS 109s | PASS 112s |
+| template | PASS 519s | PASS 187s | PASS 159s | PASS 147s |
+| interp | PASS 378s | PASS 803s | **TIMEOUT** 900s | **TIMEOUT** 900s¹ |
+| perf | PASS 102s | PASS 154s | PASS 149s | PASS 373s |
+| regex | **TIMEOUT** 900s² | **TIMEOUT** 900s² | **TIMEOUT** 900s² | **PASS 225s**³ |
+| **verdicts** | 6/8 | 7/8 | 6/8 | 7/8 (8/8 with ¹) |
+
+¹ Re-run at `TASK_TIMEOUT=1200` (server already on `ornith-128k`, single
+task): **PASS at 1067s**. Same pattern as the 07-13 tiebreak round — the
+35B-class models need the 1200s budget on `interp`/`perf`-tier tasks, 900s
+is tight but not always enough. Not a capability regression.
+
+² None of the three `qwen36u-*` variants had even written `rx.py` by the
+900s cutoff (`agent.log` = `"Operation cancelled."`, directory has only the
+harness-provided `test_rx.py`) — a different failure mode than Ornith's
+07-13 near-miss (13/14, stuck on one case): the vanilla Qwen3.6 family
+doesn't get partway through a backtracking regex engine in this budget,
+regardless of quant.
+
+³ **Notable reversal of the 07-13 finding.** That session's `ornith-128k`
+(same Q4_K_M weights) FAILED regex at 2122s/13/14 on a documented capability
+gap — `fullmatch("(a+)(a+)", "aaa")` not backtracking across group
+boundaries. This run's independently-generated solution handles that exact
+case correctly (`fullmatch('(a+)(a+)', 'aaa') == ('aa', 'a')`, verified
+directly) and passes all 14/14 in 225s — an order of magnitude faster than
+the previous attempt's 2122s before failing. Sampling non-determinism, not
+a re-test of the same solution: the gap isn't a hard architectural limit,
+just inconsistently reached.
+
+**Verdict:** none of the three official variants beats `ornith-128k`. The
+biggest file (`UD-Q4_K_XL`, 20.81 GiB) is the *worst* of the three official
+quants (double TIMEOUT) — same "bigger file ≠ better" lesson as the 07-13
+Q5_K_M experiment. `qwen36u-mxfp4` ties Ornith on verdict count and is the
+only one of the three worth keeping as a non-RL alternative; `UD-IQ4_XS`
+uniquely fails an *easy* task (`scratch`) despite being fastest, and
+`UD-Q4_K_XL` offers no advantage over either Ornith or the smaller unsloth
+quants — both are candidates for deletion. `ornith-128k` stays the default
+agentic profile.
+
+## Reference results — 2026-07-14: 27B dense candidates — all rejected, VRAM ceiling
+
+Five dense 27B finetunes were pulled from HF (all `arch qwen35`, 65
+transformer layers) as agentic-coding candidates: `unsloth/Qwen3.6-27B-MTP-GGUF`
+(UD-Q4_K_XL 17G, UD-Q3_K_XL 14G), `bottlecapai/ThinkingCap-Qwen3.6-27B-GGUF`
+(Q4_K_M 16G, no MTP head), `protoLabsAI/ThinkingCap-Qwen3.6-27B-MTP-GGUF`
+(Q4_K_M-MTP 16G, NVFP4-Q4_K_M-MTP 15G), `DavidAU/...NEO-CODE...-GGUF`
+(Q4_K_M 16G), `nerkyor/Qwen3.6-27B-DSV4Pro-GLM52-SFT-GPT55-RL-Coding-GGUF`
+(Q4-LynnStyle 19G). Unlike Qwythos-9B-v2 (dense, fits fully at `-ngl 99`),
+none of these fit whole on a 16 GB card — weight size alone (14–19 GB)
+already exceeds the ~15.3 GB actually free after desktop overhead.
+
+`-ngl 99` (full offload) OOMs on **every** variant, even at ctx 4096. Fit
+requires partial CPU offload; bisected floors (`bench_06_dense_generic.sh`
+probes, ctx 4096 unless noted):
+
+| Model | size | ngl floor | max ctx @ floor-ish ngl |
+|---|---|---|---|
+| qwen36-27b-mtp UD-Q3_K_XL | 14G | 55–60 / 65 | 32768 (ngl 55); 65536 OOMs |
+| thinkingcap-27b Q4_K_M (bottlecapai, no MTP) | 16G | 50 / 65 (55 OOMs) | 32768; 65536 OOMs |
+| thinkingcap-27b-mtp Q4_K_M-MTP (protoLabsAI) | 16G | 55 / 65 | 32768 (ngl 50); 65536 OOMs |
+| thinkingcap-27b-mtp NVFP4-Q4_K_M-MTP | 15G | 55 / 65 | 32768 (ngl 50); 65536 OOMs |
+| qwen36-27b-neocode (DavidAU), qwen36-27b-dsv4pro-coding (nerkyor) | 16G / 19G | OOM at 99, not bisected further | — |
+
+Surprise: the two protoLabsAI MTP files fit at `ngl 55` while the
+same-labelled bottlecapai baseline OOMs at `ngl 55` and needs `ngl 50` —
+same nominal "Q4_K_M", same 16 GB file size, different per-tensor bit
+allocation between repos. NVFP4 (native Blackwell FP4 format) showed no
+VRAM or load-time advantage over plain Q4_K_M on this llama.cpp build —
+same ngl floor, same ctx ceiling, ~18s to fail vs ~4s for k-quants when it
+doesn't fit (single large contiguous buffer allocation, not incremental).
+
+**Verdict: the entire 27B dense family is rejected — hard ceiling ~32K
+context on this 16 GB card, never reaches the 128K the agentic profiles
+need.** All five GGUFs deleted (113 GB freed: `qwen36-27b-mtp/`,
+`thinkingcap-27b/`, `thinkingcap-27b-mtp/`, `qwen36-27b-neocode/`,
+`qwen36-27b-dsv4pro-coding/`). `qwen35-9b-dsv4flash` (Jackrong distill,
+9B, fits fully at `-ngl 99` like Qwythos) was kept — see depth-sweep
+numbers in the session this section summarizes. `ornith-128k` stays the
+default 128K agentic profile; `bench_06_dense_generic.sh` (generic
+MODEL/MTP_MODEL/NGL/CTX-parametrized dense bench, adapted from bench_04)
+stays in the repo for future dense-model candidates that might actually
+fit.
+
+## Reference results — 2026-07-14: dsv4flash agentic (bench_05) + ornith-128k regex re-test
+
+`qwen35-9b-dsv4flash` (Jackrong Qwen3.5-9B-DeepSeek-V4-Flash distill, dense,
+fits fully at `-ngl 99`) added as aillama profile `dsv4flash` and run
+through the full `bench_05` 8-task suite against `ornith-128k`
+(`TASK_TIMEOUT=900`):
+
+| Model | Task | Verdict | Time | Note |
+|---|---|---|---|---|
+| dsv4flash | bugfix | PASS | 21s | |
+| dsv4flash | scratch | PASS | 122s | |
+| dsv4flash | lru | PASS | 138s | |
+| dsv4flash | multifile | PASS | 29s | |
+| dsv4flash | template | FAIL | 691s | 4/10 tests — `{% for %}` never expanded, output is the literal template text |
+| dsv4flash | interp | FAIL | 608s | 13/13(!) — parser non-functional, `ParseError` on nearly every construct |
+| dsv4flash | perf | PASS | 28s | |
+| dsv4flash | regex | FAIL | 810s | 11/14 — mostly `None` (no match at all), far worse than ornith's near-miss |
+| ornith-128k | bugfix | PASS | 84s | |
+| ornith-128k | scratch | PASS | 141s | |
+| ornith-128k | lru | PASS | 82s | |
+| ornith-128k | multifile | PASS | 96s | |
+| ornith-128k | template | PASS | 474s | |
+| ornith-128k | interp | PASS | 651s | |
+| ornith-128k | perf | PASS | 251s | |
+| ornith-128k | regex | TIMEOUT | 900s | see re-test below |
+| **verdicts** | | **dsv4flash 5/8, ornith-128k 7/8 (+regex re-test)** | | |
+
+**dsv4flash verdict:** same "classic small-model gap" as Qwythos-9B before
+it — fast and solid on bugfix/scratch/lru/multifile/perf (the well-scoped
+tasks), but the three parser/compiler-class tasks (template, interp, regex)
+are not just slow, they're *substantively* wrong (interp: 13/13 tests
+failing, not a near-miss). Confirms the pattern is architectural/scale, not
+specific to Qwythos — a second 9B dense model hits the identical wall.
+Not worth promoting over `ornith-128k` or `qwythos` for agentic work;
+useful only where the well-scoped-task speed matters more (bugfix in 21s
+vs ornith's 84s) and parser-class tasks won't come up.
+
+**ornith-128k/regex re-test:** re-ran the single task at `TASK_TIMEOUT=1200`
+(same profile already warm) hoping for the `interp`-style "just needed more
+budget" outcome from 07-14 earlier today — instead: **TIMEOUT again at
+1200s.** Inspected the in-progress `rx.py` manually: **13/14 tests passing**,
+the *exact same* `test_backtracking_across_groups` failure
+(`fullmatch("(a+)(a+)", "aaa")` not backtracking across capture-group
+boundaries) as the 07-13 FAIL (2122s/13/14). Unlike `interp`, this is not a
+timeout-budget problem — extending the budget doesn't help because the
+model gets stuck retrying the same unfixed edge case rather than making
+slow-but-steady progress. Fourth data point on this specific gap across
+sessions: PASS 225s (07-14, lucky correct generation) / FAIL 2122s 13/14
+(07-13) / TIMEOUT 900s (today) / TIMEOUT 1200s 13/14 (today, retest) — 3
+of 4 runs hit the same capture-group backtracking bug; only extending the
+timeout further would need to out-wait the retry loop, not just budget for
+slower-but-correct generation. Treat ornith's regex capability as
+genuinely non-deterministic per-session, not a solved gap.
+
+## Reference results — 2026-07-14: GPT-OSS-20B-Uncensored-HauhauCS-Aggressive
+
+`HauhauCS/GPT-OSS-20B-Uncensored-HauhauCS-Aggressive` (MXFP4, native
+gpt-oss MoE quant, 20.91B params, 11.27 GiB) — fits **fully in VRAM at
+`-ngl 99` with no `--n-cpu-moe`**, even at the full 131072 ctx (only the
+`llama-bench -d 131072` sweep point OOMs; the real `llama-server` boot at
+ctx 131072 works fine — sweep vs server allocate the compute buffer
+differently). Added as aillama profile `gpt-oss20b`.
+
+Depth sweep + real request (`bench_06_dense_generic.sh`):
+
+| depth | pp512 (t/s) | tg128 (t/s) |
+|---|---|---|
+| 0 | 10697.8 | 239.3 |
+| 16384 | 7781.4 | 209.8 |
+| 65536 | 3941.9 | 155.6 |
+| real request (683 tok prompt) | pp 3437.7 | tg 213.8 |
+
+**By far the fastest model in the fleet** — tg 213.8 tok/s vs dsv4flash's
+~93 and ornith-128k's ~61 at comparable depth.
+
+bench_05 agentic (`TASK_TIMEOUT=900`):
+
+| Task | Verdict | Time | Note |
+|---|---|---|---|
+| bugfix | PASS | 9s | |
+| scratch | PASS | 15s | |
+| lru | PASS | 17s | |
+| multifile | PASS | 17s | |
+| template | FAIL | 57s | 8/10 — only `nested_loops`, `if_without_else` |
+| interp | FAIL | 120s | 10/13 — `SyntaxError` parsing unary minus |
+| perf | PASS | 25s | |
+| regex | FAIL | 128s | 6/14 — code bug (`AttributeError: 'Matcher' object has no attribute 'index'`) plus the familiar capture-group backtracking miss |
+| **verdict** | **5/8** | **~390s total** | vs dsv4flash 5/8 in ~2450s, ornith-128k 7/8(+) in ~2680s |
+
+**Verdict:** same 5/8 as `dsv4flash` but qualitatively much stronger —
+these are *near-misses* (8/10, 10/13, 6/14), not `dsv4flash`'s wholesale
+failures (0/13 on interp). Combined with ~7× the throughput of ornith and
+~2-6× that of dsv4flash, this is the best speed/capability tradeoff tested
+today. Not a drop-in replacement for `ornith-128k` (misses the same
+parser-class ceiling, plus a real bug in the regex `Matcher` class), but a
+strong candidate for the "fast iteration" role Qwythos was filling — worth
+a second bench_05 run to check the regex `AttributeError` isn't
+introduced-vs-inherent (different agent transcript might avoid the buggy
+code path), and worth probing whether the uncensored/aggressive finetune
+variant matters here vs an official gpt-oss-20b quant.
 
 ## Reference results — 2026-07-13: GLM-4.7-Flash refresh + agentic
 
