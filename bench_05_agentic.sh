@@ -850,15 +850,22 @@ verify_interp() {
 	[[ -f "$dir/calc.py" ]] || { echo "calc.py not created"; return 1; }
 	# detect BARE builtin eval/exec/compile calls only — a grep would false-
 	# positive on re.compile() tokenizers and methods named eval() (seen live)
+	local rc=0
 	(cd "$dir" && python - <<-'PY'
 		import ast, sys
-		tree = ast.parse(open("calc.py").read())
+		try:
+		    tree = ast.parse(open("calc.py").read())
+		except SyntaxError as e:
+		    print(f"calc.py does not parse: {e}", file=sys.stderr)
+		    sys.exit(2)
 		bad = [n.func.id for n in ast.walk(tree)
 		       if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
 		       and n.func.id in ("eval", "exec", "compile")]
 		sys.exit(1 if bad else 0)
 	PY
-	) || { echo "used eval/exec/compile"; return 1; }
+	) || rc=$?
+	(( rc == 2 )) && { echo "calc.py has invalid syntax"; return 1; }
+	(( rc != 0 )) && { echo "used eval/exec/compile"; return 1; }
 	scored_pytest "$dir" 120 13 || { echo "pytest failing"; return 1; }
 	return 0
 }
@@ -1042,9 +1049,14 @@ verify_regex() {
 	[[ -f "$dir/rx.py" ]] || { echo "rx.py not created"; return 1; }
 	# AST check, not grep: forbid importing re/regex (any form) and dynamic
 	# import escape hatches (__import__, importlib)
+	local rc=0
 	(cd "$dir" && python - <<-'PY'
 		import ast, sys
-		tree = ast.parse(open("rx.py").read())
+		try:
+		    tree = ast.parse(open("rx.py").read())
+		except SyntaxError as e:
+		    print(f"rx.py does not parse: {e}", file=sys.stderr)
+		    sys.exit(2)
 		FORBIDDEN = {"re", "regex", "sre_compile", "sre_parse", "_sre", "importlib"}
 		bad = []
 		for n in ast.walk(tree):
@@ -1058,7 +1070,9 @@ verify_regex() {
 		        bad.append("__import__")
 		sys.exit(1 if bad else 0)
 	PY
-	) || { echo "used re/regex/importlib"; return 1; }
+	) || rc=$?
+	(( rc == 2 )) && { echo "rx.py has invalid syntax"; return 1; }
+	(( rc != 0 )) && { echo "used re/regex/importlib"; return 1; }
 	scored_pytest "$dir" 60 14 || { echo "pytest failing"; return 1; }
 	return 0
 }

@@ -34,6 +34,49 @@ documented there plus script defaults. General rules:
   OOM crashes.
 - All commands run from `~/Claude/llm/`.
 
+## 2026-07-15 — 9× single-model repeat, gpt-oss20b-q8_0 only (extends the 5x below to 14 total)
+
+```bash
+for i in 1 2 3 4 5 6 7 8 9; do
+  MODELS=gpt-oss20b-q8_0 TASK_TIMEOUT=1200 ./bench_05_agentic.sh
+done
+# Combined with the 5x batch below: 14 total runs. Found codec/toposort can
+# also fail (13/14 each, first time ever seen) -- the "rock solid" tier
+# isn't literally 100%, just far more reliable than the parser tier. Also
+# surfaced a real bug in bench_05_agentic.sh: verify_regex()/verify_interp()
+# ran ast.parse() unguarded, so a genuine SyntaxError in the model's file
+# was mislabeled as a banned-import/eval disqualification. Fixed in this
+# script (SyntaxError now caught explicitly, distinct NOTE). Details:
+# BENCH.md 2026-07-15 "Second follow-up" section.
+```
+
+## 2026-07-15 — 5× single-model repeat, gpt-oss20b-q8_0 only (interp/regex noise check)
+
+```bash
+for i in 1 2 3 4 5; do
+  MODELS=gpt-oss20b-q8_0 TASK_TIMEOUT=1200 ./bench_05_agentic.sh
+done
+# Isolates gpt-oss20b-q8_0 alone (no ornith-128k in the mix) to measure its
+# own run-to-run noise cleanly. Result: interp and regex both FAIL ~2/5
+# runs -- comparably noisy, not one rare fluke (see BENCH.md 2026-07-15
+# follow-up section). NOTE: shared WORKROOT across the loop overwrites
+# each run's agent.log -- use WORKROOT=/tmp/bench-agentic-run$i per
+# iteration next time to keep evidence from failing runs.
+```
+
+## 2026-07-15 — 3× full 12-task sweep, gpt-oss20b-q8_0 vs ornith-128k (weak-spot hunt)
+
+```bash
+for i in 1 2 3; do
+  MODELS=gpt-oss20b-q8_0,ornith-128k TASK_TIMEOUT=1200 ./bench_05_agentic.sh
+done
+# default TASKS (all 12); TASK_TIMEOUT raised globally 900->1200 for the
+# slow parser tier (ornith-128k) and long-reasoning-chain tasks on the
+# fast model (gpt-oss20b-q8_0) alike. Result: ornith-128k/regex TIMEOUT
+# in all 3 runs even at 1200s (see BENCH.md 2026-07-15 section) -- confirms
+# it's a capability ceiling, not a budget problem.
+```
+
 ## 2026-07-14 — official unsloth Qwen3.6-35B-A3B-GGUF vs Ornith
 
 ```bash

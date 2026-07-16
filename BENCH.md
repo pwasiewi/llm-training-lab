@@ -11,6 +11,81 @@ with MoE CPU/GPU hybrid offload tuned for 16 GB VRAM (RTX 5070 Ti) + 64 GB RAM.
 | `bench_04_qwythos.sh` | mainline llama.cpp, Qwythos-9B-v2 (dense hybrid, no MoE) | `llama-bench`, `llama-server` |
 | `bench_05_agentic.sh` | agentic coding capability (any aillama profile) | `qwen` (qwen-code), `aillama` |
 
+## Model fleet — single-table summary
+
+One row per model/variant ever tested on this box, accepted and rejected
+alike. Columns may be partially empty where a model was rejected before the
+measurement was taken. Short per-model notes follow the table; full
+evidence lives in the dated "Reference results" sections below (archive —
+never rewritten, only appended). Status legend: **DEFAULT** = recommended
+profile for its role, kept = usable niche/fallback, **REJECTED** = do not
+use (GGUF possibly deleted), ref = kept only as a data point.
+
+| Profile / model | Arch | Quant, file size | Fit @128K (`--n-cpu-moe`) | tg tok/s | bench_05 weak spots | Status / role |
+|---|---|---|---|---|---|---|
+| `gpt-oss20b-q8_0` | MoE 20.9B | Q8_0, 12.11 GiB | whole (0) | ~214 | regex 57%, interp 71% (14 runs); template never failed | **DEFAULT fast tier** |
+| `ornith-128k` (Ornith-1.0-35B) | qwen35moe A3B | Q4_K_M, 19.7 GiB | 24 | ~52 | regex never finishes (3/3 TIMEOUT @1200s); rest near-clean | **DEFAULT serious agentic** |
+| `qwythos` (Qwythos-9B-v2 +MTP) | qwen35 dense hybrid | Q8_0 | whole | 149 (MTP) | parser tier FAILs (9B ceiling) | fast iteration on scoped tasks |
+| `ornith-9b` (Ornith-1.0-9B) | qwen35 dense | Q8_0, 9.53 GiB | whole | | interp 12/13 near-miss @900s; perf anti-pattern | accepted; judgment pending |
+| `qwen36-128k` (HauhauCS 35B-A3B) | qwen35moe | IQ4_XS, 17.43 GiB | 14–16 | ~82 | fastest template (118 s); insort-not-Fenwick on perf | general alternate |
+| `qwen36u-mxfp4-128k` (unsloth) | qwen35moe | MXFP4_MOE, 20.2 GiB | 16+ | | tied Ornith 7/8 | backup alternate |
+| `glm-flash` (GLM-4.7-Flash) | deepseek2 MoE 30B-A3B | Q4_K_XL, 17.5 GiB | 12 @32K / 24 @128K | 63 / 39.6 | 4/7 — gives up early on parser tier | 32K chat only |
+| `dsv4flash` (Qwen3.5-9B-DSV4) | qwen35 dense | Q6_K | whole | ~93 | interp 0/13 — total parser failure | chat only, **NOT an agent** |
+| `gpt-oss20b` (MXFP4-Aggressive) | MoE 20.9B | MXFP4, 11.27 GiB | whole (0) | ~214 | never passed template+interp across runs | fallback/ref (superseded by Q8_0) |
+| `gpt-oss20b-f16` (unsloth F16) | MoE 20.9B | F16, 12.83 GiB | 2 | 2–6× slower | regex 6/14 | fallback for interp-style work |
+| `gpt-oss20b-heretic` (DavidAU) | MoE 20.9B | IQ4_NL, 12.6 GiB | 1 (profile 2) | slowest of family | template 4/10, interp 0/13, regex disq. | **REJECTED** (conf ref) |
+| `ornith-q5-128k` (Ornith Q5_K_M) | qwen35moe | Q5_K_M, 24 GiB | 22 | −13% vs Q4 | regex TIMEOUT, no file at all | ref — not for time-boxed work |
+| `gemma4-fable5` (yuxinlu1 12B) | gemma4 dense | Q8_0, 12.7 GiB | ctx ≤32K only! | | 5/10; interp 1/13, regex 0/14; gen_n=1 red flag | **REJECTED** |
+| `gemma4-qat` (HauhauCS 12B) | gemma4 dense | Q4_K_M, 7.38 GiB | | | 100% reproducible stream-hang after task 1 | **REJECTED** |
+| 27B dense family (5 finetunes) | qwen35 dense 65L | Q4, 16–19 GB | impossible @128K (any quant) | | | **REJECTED**, GGUFs deleted (113 GB) |
+| `qwen36u-iq4xs` / `qwen36u-q4kxl` | qwen35moe | 16.5 / 20.8 GiB | 10 / 17 | | scratch FAIL / 2× TIMEOUT | **REJECTED**, deleted (38 GB) |
+| GLM 5.2 (744B) | MoE | any | needs ≥245 GB RAM+VRAM | | | **REJECTED** — never fit |
+
+### Per-model notes
+
+- **`gpt-oss20b-q8_0`** — the fast-tier default since 2026-07-14/15. gpt-oss
+  keeps MoE experts at native ~4-bit regardless of quant label, so Q8_0
+  costs almost nothing over MXFP4 and still fits whole at 131072 ctx
+  (15.0/16.3 GiB). 14 single-model runs: 6 easy tasks + template at 100%,
+  codec/toposort 93%, interp 71%, regex 57%. Expect one parser-tier miss
+  per run as the norm, not a clean 12/12.
+- **`ornith-128k`** — RL agentic-coding pedigree (SWE-bench 75.6%); best
+  engineering judgment of the fleet (Fenwick tree on perf with 9× margin).
+  Weak spot: regex — never converged in any budget tested (900/1200 s);
+  over-verbose backtracking + self-verification loop. Q4_K_M beats both
+  Q5_K_M and any bigger file (repeated "bigger file is not better" lesson).
+- **`qwythos`** — dense hybrid Gated-DeltaNet, MTP variant gives +75% tg for
+  −25% pp. 3–5× faster than 35B on easy tasks, hard ceiling on the parser
+  tier. One known Xid 8 hang at ~69K ctx with MTP on (pkill -9, retry
+  without `--spec-type draft-mtp`).
+- **`ornith-9b`** — fits whole at full ctx; near-miss profile resembles its
+  35B parent (needs time, not capability). Not yet fully ranked vs
+  gpt-oss20b family — retest at `TASK_TIMEOUT=1200` pending.
+- **`qwen36-128k` / `qwen36u-mxfp4-128k`** — general-purpose alternates.
+  HauhauCS IQ4_XS is the speed pick; unsloth MXFP4_MOE was the only one of
+  three official unsloth quants worth keeping (the other two deleted).
+  mainline llama.cpp beats the ik fork on this arch at depth.
+- **`glm-flash`** — pp champion on the ik fork (2×) but dominated as an
+  agent (gives up instead of iterating); floor drifted 2 steps between
+  llama.cpp builds (re-probe after rebuilds). 128K possible but 24% slower
+  than ornith-128k — kept as a 32K chat profile.
+- **`dsv4flash`** — fine as a fast chat model, catastrophic as an agent
+  (interp 0/13 — looked identical to gpt-oss20b's "5/8" until the SCORE
+  column existed; that contrast motivated scored verdicts).
+- **gpt-oss20b variants** — MXFP4-Aggressive was the original default,
+  demoted after it never passed template+interp in any later run; F16
+  breaks the fits-whole property (floor 2) and pays 2–6× wall-clock for one
+  extra interp pass; HERETIC failed the parser tier outright and was the
+  slowest of the family.
+- **gemma4 pair** — new arch loads fine on llama.cpp 9988, so the rejects
+  are model-level: QAT variant has a 100%-reproducible dead-stream bug
+  after the first task; fable5 variant underperforms a 9B and can't hold
+  >32K ctx compute buffers.
+- **27B dense family** — architectural VRAM ceiling on 16 GB at 128K: whole
+  model never fits (`-ngl 99` OOM even at 4K ctx), partial offload caps at
+  ~32K ctx. Independent of finetune and quant; NVFP4 gave no Blackwell
+  advantage. All five GGUFs deleted.
+
 ## What is measured
 
 - **pp (prompt processing)** — tokens/s while ingesting the prompt; dominates
@@ -315,6 +390,152 @@ q8_0 never failed to pass `template`/`interp` and only ever near-missed
 `regex` clean sweep on the repeat. Same VRAM-fit class, same wall-clock
 tier — no cost to the switch. MXFP4 profile kept in `models.conf` as a
 fallback/reference, not recommended for new work.
+
+## Reference results — 2026-07-15: 3× full 12-task sweep, gpt-oss20b-q8_0 vs ornith-128k, TASK_TIMEOUT=1200
+
+Deliberate weak-spot hunt on the two current fleet leaders: full default
+`TASKS` (all 12), 3 repeats each, `TASK_TIMEOUT` raised globally to 1200s
+(motivation: `ornith-128k` is slow, `gpt-oss20b-q8_0` is fast but its
+`interp`/`regex` reasoning chains run long). Command:
+
+```bash
+for i in 1 2 3; do
+  MODELS=gpt-oss20b-q8_0,ornith-128k TASK_TIMEOUT=1200 ./bench_05_agentic.sh
+done
+```
+
+### gpt-oss20b-q8_0 — 34/36 verdicts PASS
+
+| Task | Run 1 | Run 2 | Run 3 |
+|------|-------|-------|-------|
+| bugfix..perf (9 tasks) | PASS 100% (all 3 runs, all 9 tasks) | | |
+| interp | PASS 126s | PASS 89s | **FAIL 0/13 (0%) 37s** |
+| regex | FAIL 12/14 (85%) 139s | PASS 14/14 188s | PASS 14/14 95s |
+
+The `interp` collapse in run 3 was not a reasoning failure: `agent.log` was
+one line — `[API Error: The model produced output that does not match the
+expected peg-native format]` — qwen-code choked on a malformed tool-call
+response from the server, and the task died in 37s with nothing built. New
+failure signature, added to the skill's catalogue. Otherwise fully
+deterministic: 9 non-parser tasks clean 3/3, `template` clean 3/3, `regex`
+2/3 clean (14/14) with one near-miss.
+
+### ornith-128k — 30/36 verdicts PASS (4 more if you count the 100%-scored TIMEOUT)
+
+| Task | Run 1 | Run 2 | Run 3 |
+|------|-------|-------|-------|
+| bugfix..toposort, perf (9 tasks) | PASS 100% (all 3 runs, all 9 tasks; wall time 81–180s) | | |
+| template | PASS 235s | **FAIL 4/10 (40%) 497s** | PASS 345s |
+| interp | TIMEOUT 13/13 (100%!) 1200s | PASS 623s | TIMEOUT 10/13 (76%) 1200s |
+| regex | TIMEOUT — (unscored) 1200s | TIMEOUT 11/14 (78%) 1200s | TIMEOUT 11/14 (78%) 1200s |
+
+`interp` run 1's TIMEOUT actually scored 13/13 (100%) — the solution was
+correct, the agent just didn't wrap up (extra polishing/verification) before
+the 1200s cutoff. Genuine near-miss only in run 3 (76%).
+
+**`regex` timed out in all 3 runs, even at the raised 1200s budget** — this
+settles it: raising `TASK_TIMEOUT` does not fix `ornith-128k` on this task,
+it's a reproducible capability/approach ceiling (verbose backtracking
+implementation + heavy self-verification loop), not a clock problem. Run 1's
+`regex` had no score at all — inspecting `/tmp/bench-agentic` showed the
+same pattern as 07-14's fifth data point: model was mid-refactor of its own
+AST classes when SIGTERM hit.
+
+**Conclusion**: both models are near-clean on the easy+mid tier (18/18 and
+27/27 respectively — fully non-discriminating, as expected). The parser
+tier is where each model's specific weak spot lives: `gpt-oss20b-q8_0`'s is
+an occasional infra-level tool-call parse error (rare, not a reasoning
+gap); `ornith-128k`'s is a consistent, reproducible inability to finish
+`regex` in any tested time budget. Neither finding changes the existing
+role split (`gpt-oss20b-q8_0` = fast tier default, `ornith-128k` = serious
+agentic work default) but both are now documented weak spots to watch for.
+
+**Correction from the 5-run single-model repeat below: the `interp` collapse
+was not rare** — see below, it recurred at a ~40% rate in a same-day,
+same-condition batch.
+
+### Follow-up: `gpt-oss20b-q8_0` alone, 5× repeat, `TASK_TIMEOUT=1200` (same day)
+
+```bash
+for i in 1 2 3 4 5; do
+  MODELS=gpt-oss20b-q8_0 TASK_TIMEOUT=1200 ./bench_05_agentic.sh
+done
+```
+
+| Task | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+|------|-------|-------|-------|-------|-------|
+| bugfix..perf, template (10 tasks) | PASS 100% (all 5 runs, all 10 tasks) | | | | |
+| interp | PASS 173s | **FAIL 8/13 (61%) 66s** | **FAIL 0/13 (0%) 46s** | PASS 248s | PASS 233s |
+| regex | **FAIL 10/14 (71%) 367s** | PASS 49s | PASS 50s | **FAIL 13/14 (92%) 86s** | PASS 165s |
+
+50/50 clean on every non-parser task plus `template` — that part is fully
+solid. But `interp` and `regex` are **both** noisy at roughly the same rate
+(3 PASS / 2 FAIL each, 60%), not just `regex` as the earlier same-day
+section framed it. The two `interp` FAILs are the interesting bit: **fast
+failures** (46s, 66s) vs. its normal passing wall-time (173–248s) — the
+model takes a quick wrong turn rather than grinding and running out of
+budget, the opposite time signature from a near-miss. Whether these were
+the same "malformed tool-call" API-format error as the run documented
+above is unknown — `WORKROOT` is shared across iterations of the loop, so
+each run's `/tmp/bench-agentic` overwrote the previous one's `agent.log`
+before it could be inspected. **Practical fix for next time**: parameterize
+`WORKROOT=/tmp/bench-agentic-run$i` per iteration to keep every run's
+artifacts for postmortem.
+
+**Revised verdict**: `gpt-oss20b-q8_0` is rock-solid (100%) on 10 of 12
+tasks but has two comparably-noisy parser-tier weak spots, `interp` and
+`regex`, each landing a real FAIL roughly 2 times in 5 — not a single rare
+fluke. Still the right fast-tier default (non-parser-tier work is
+unaffected, and `ornith-128k`'s own parser-tier failure rate on `regex` is
+worse — 3/3 TIMEOUT), but don't expect a clean 12/12 sweep as the norm on
+repeated runs; expect one parser-tier miss more often than not.
+
+### Second follow-up: 9 more single-model runs (same day) — bug found in the verifier itself
+
+```bash
+for i in 1 2 3 4 5 6 7 8 9; do
+  MODELS=gpt-oss20b-q8_0 TASK_TIMEOUT=1200 ./bench_05_agentic.sh
+done
+```
+
+Combined with the 5-run batch above: **14 total single-model runs today.**
+Per-task pass rate across all 14:
+
+| Task | Pass rate | Notes |
+|------|-----------|-------|
+| bugfix, lru, multifile, intervals, fsm, perf | 14/14 (100%) | |
+| **codec** | 13/14 (93%) | one FAIL 0/12 (0%, 21s) — first-ever failure seen on this task |
+| **toposort** | 13/14 (93%) | one FAIL 0/11 (0%, 32s) — first-ever failure seen on this task |
+| **template** | 14/14 (100%) | the only parser-tier task that has never failed |
+| **interp** | 10/14 (71%) | 4 FAILs: 0%, 61%, 69%, 92% |
+| **regex** | 8/14 (57%) | worst task: 6 FAILs across two batches |
+
+Two new findings:
+
+1. **The "rock-solid non-parser tier" claim needed correcting.** `codec` and
+   `toposort` had been 100% in every prior comparison (2026-07-14 onward)
+   but each failed completely (0%) once in this larger sample — still much
+   rarer than the parser tier (~7% vs ~30-40%), but not literally
+   deterministic. `template` is the only task with a perfect 14/14 record.
+
+2. **A real bug in `bench_05_agentic.sh`'s verifiers, found via a raw
+   traceback in run 4's `regex` FAIL**: the NOTE said "used re/regex/
+   importlib" (implying a banned-import disqualification), but the actual
+   stdout showed `ast.parse()` itself crashing with `IndentationError` —
+   the generated `rx.py` had invalid syntax and never even parsed.
+   `verify_regex()` and `verify_interp()` both ran `ast.parse()` unguarded,
+   so any `SyntaxError` was caught by the same `||` handler that reports
+   banned constructs, mislabeling "code doesn't parse" as "code uses a
+   forbidden import/builtin". **Fixed**: both verifiers now catch
+   `SyntaxError` explicitly and exit 2 (distinct from exit 1 for an actual
+   banned construct), so the reported NOTE is now "rx.py/calc.py has
+   invalid syntax" when that's the real cause. This means some past
+   "disqualification" NOTEs (this run 4, and possibly HERETIC's `interp`
+   FAIL on 2026-07-14) may have actually been syntax errors, not banned-
+   construct violations — the practical verdict (FAIL either way) doesn't
+   change, but the stated *reason* might be wrong in older BENCH.md
+   entries. Not worth re-litigating old verdicts over, but trust the NOTE
+   text going forward now that the fix is in.
 
 ## Reference results — 2026-07-14: gpt-oss20b vs Ornith-1.0-9B (new small Ornith)
 
