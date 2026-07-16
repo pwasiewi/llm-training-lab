@@ -143,6 +143,9 @@ on the same GGUF with MoE CPU/GPU offload tuned for 16 GB VRAM.
 | `bench_01_llamacpp.sh` | mainline llama.cpp: `llama-bench` sweep over `--n-cpu-moe` + timed `llama-server` request |
 | `bench_02_ikllama.sh` | ik_llama.cpp fork (`ik-llama-*` binaries): same two tests |
 | `bench_03_ollama.sh` | ollama add-on: cold/warm `/api/generate`, auto CPU/GPU split shown via `ollama ps` |
+| `bench_04_qwythos.sh` | Qwythos-9B-v2 (dense hybrid): context-depth sweep + server request + MTP on/off comparison |
+| `bench_05_agentic.sh` | agentic coding capability: 12 tasks via headless qwen-code against any aillama profile, objective verdicts + SCORE |
+| `bench_06_dense_generic.sh` | bench_04 generalized to any dense model (`MODEL=` required); per-depth loop survives OOM at deeper values |
 
 > 2026-07-05 (GLM-4.7-Flash 30B-A3B Q4): ik_llama.cpp pp 2106 tok/s (2× mainline),
 > mainline tg 92 tok/s best, ollama far behind (whole-layer offload). Details in BENCH.md.

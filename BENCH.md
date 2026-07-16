@@ -10,6 +10,39 @@ with MoE CPU/GPU hybrid offload tuned for 16 GB VRAM (RTX 5070 Ti) + 64 GB RAM.
 | `bench_03_ollama.sh` | ollama (comparison add-on) | `ollama` |
 | `bench_04_qwythos.sh` | mainline llama.cpp, Qwythos-9B-v2 (dense hybrid, no MoE) | `llama-bench`, `llama-server` |
 | `bench_05_agentic.sh` | agentic coding capability (any aillama profile) | `qwen` (qwen-code), `aillama` |
+| `bench_06_dense_generic.sh` | mainline llama.cpp, any dense (non-MoE) model — bench_04 generalized, per-depth loop so one OOM doesn't kill the sweep | `llama-bench`, `llama-server` |
+
+## The bench_05 agentic tasks (key to the fleet table below)
+
+The "bench_05 weak spots" column in the fleet table refers to these 12
+coding tasks, run through headless qwen-code against the live llama-server
+and verified objectively by the script (protected-file checksums + its own
+pytest — the agent's claims are never trusted). Verdict = PASS / FAIL /
+TIMEOUT, each with a SCORE `passed/total (pct%)`; TIMEOUT is scored on
+whatever the agent left at the cutoff.
+
+| Task | Tier | Tests | What it probes |
+|---|---|---|---|
+| `bugfix` | easy | 4 | find & fix one bug in an existing module from a failing pytest |
+| `scratch` | easy | agent-written | build a CLI tool + its own tests in an empty dir |
+| `lru` | easy | 8 | implement LRU cache (capacity + TTL + injectable clock) from tests only |
+| `multifile` | easy | 5 | three distinct bugs across three modules |
+| `intervals` | mid | 12 | booking Scheduler: half-open overlap, exact cancel, free-slot search |
+| `fsm` | mid | 13 | Order state machine: guarded transitions, atomic overpay rejection |
+| `codec` | mid | 12 | LEB128 varint + XOR checksum codec; byte-literal assertions (bit/byte axis) |
+| `toposort` | mid | 11 | lexicographically-smallest topological order (needs heapq; FIFO Kahn fails) |
+| `template` | parser | 10 | mini template engine: `{{ var }}`, dotted lookup, `{% if/else %}`, nested `{% for %}` |
+| `interp` | parser | 13 | expression evaluator: precedence, right-assoc `^`, lazy conditional, functions; **eval/exec/compile banned** (AST-verified) |
+| `perf` | parser | 6 | EventLog range queries under a hard 10 s budget (400K adds + 100K queries — naive scan and insort both fail) |
+| `regex` | parser | 14 | backtracking regex engine: classes, ranges, `\d \w \s`, greedy `* + ?`, alternation, nested capture groups; **import re/regex banned** (AST-verified) |
+
+Reading the results: the easy+mid tier is a near-clean sweep for every
+strong model (discriminates only weak ones); the parser tier discriminates
+the top of the fleet but is slow and noisy — sampling non-determinism
+regularly flips verdicts between same-day runs, so single-run rankings on
+template/interp/regex are meaningless (repeat 2–3×). A FAIL splits into
+*disqualification* (banned construct — judgment gap) vs *near-miss*
+(e.g. 13/14 — capability edge); the NOTE column tells which.
 
 ## Model fleet — single-table summary
 
@@ -117,6 +150,13 @@ use (GGUF possibly deleted), ref = kept only as a data point.
   context, and an MTP speculative-decoding on/off comparison (`--spec-type
   draft-mtp`, needs the `*-MTP-*.gguf` variant). Full results: see the
   2026-07-12 reference section below.
+- `bench_06` is `bench_04` generalized to **any** dense model (no hardcoded
+  defaults; `MODEL=` required, `MTP_MODEL=`/`NGL=`/`CTX=` optional). Same
+  three measurements — depth sweep, real server request, optional MTP
+  comparison — but each depth value runs as a separate `llama-bench`
+  invocation, so one OOM logs an error and the sweep continues instead of
+  dying on its first value. Written for the 27B/12B/9B dense candidate
+  round (2026-07-14).
 
 ## Usage
 
@@ -130,6 +170,9 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 ./bench_04_qwythos.sh -b       # depth sweep only; -s server only; -m MTP only
 NCMOE_LIST=6,8 CTX=16384 ./bench_01_llamacpp.sh   # env overrides
 DEPTH_LIST=0,32768 CTX=32768 ./bench_04_qwythos.sh   # bench_04 env overrides
+MODEL=~/models/foo/foo-Q8_0.gguf ./bench_06_dense_generic.sh   # any dense model; -b/-s/-m like bench_04
+MODEL=... MTP_MODEL=... NGL=50 CTX=32768 ./bench_06_dense_generic.sh   # partial offload + MTP comparison
+MODELS=gpt-oss20b-q8_0,ornith-128k TASK_TIMEOUT=1200 ./bench_05_agentic.sh   # agentic suite
 ```
 
 ## Model Storage
@@ -194,6 +237,22 @@ will write large blobs back under `/home`.
 Flags: `-k` keeps the daemon running after the test (by default the script
 stops the daemon only if it started it). The GGUF import creates a blob copy
 (~model size) under `OLLAMA_MODELS`; remove with `ollama rm glm47-flash-q4`.
+
+### bench_06
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MODEL` | *(empty — required)* | main GGUF; no hardcoded default, unlike bench_04 |
+| `MTP_MODEL` | empty | GGUF with MTP head; enables the `-m` speculative-decoding comparison |
+| `NGL` | `99` | `-ngl` layers on GPU — the knob for dense models that don't fit whole (there is no `--n-cpu-moe` axis here) |
+| `DEPTH_LIST` | `0,16384,65536,131072` | `llama-bench -d` sweep; each depth is a **separate** invocation, so one OOM logs and continues instead of killing the sweep |
+| `CTX` | `65536` | server context for the real-request test |
+| `REPS` | `2` | `llama-bench` repetitions per depth |
+| `THREADS` / `PORT` / `NPREDICT` / `PROMPT_REPEATS` / `CACHE_TYPE` / `FA_FLAG` | as bench_01 (`PORT` 8090) | shared plumbing |
+
+Flags like bench_04: `-b` depth sweep only, `-s` server test only, `-m` MTP
+comparison only (requires `MTP_MODEL`); no flag = all (skips `-m` when
+`MTP_MODEL` is unset).
 
 ## Reference results — 2026-07-14: gpt-oss-20b quant/finetune variants (MXFP4-Aggressive vs F16 vs HERETIC)
 
