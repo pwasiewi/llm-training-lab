@@ -11,6 +11,7 @@ with MoE CPU/GPU hybrid offload tuned for 16 GB VRAM (RTX 5070 Ti) + 64 GB RAM.
 | `bench_04_qwythos.sh` | mainline llama.cpp, Qwythos-9B-v2 (dense hybrid, no MoE) | `llama-bench`, `llama-server` |
 | `bench_05_agentic.sh` | agentic coding capability (any aillama profile) | `qwen` (qwen-code), `aillama` |
 | `bench_06_dense_generic.sh` | mainline llama.cpp, any dense (non-MoE) model — bench_04 generalized, per-depth loop so one OOM doesn't kill the sweep | `llama-bench`, `llama-server` |
+| `bench_07_workflow.sh` | agentic **workflow discipline** (any aillama profile) — the failure axes bench_05 is blind to | `qwen` (qwen-code), `aillama` |
 
 ## The bench_05 agentic tasks (key to the fleet table below)
 
@@ -43,6 +44,42 @@ regularly flips verdicts between same-day runs, so single-run rankings on
 template/interp/regex are meaningless (repeat 2–3×). A FAIL splits into
 *disqualification* (banned construct — judgment gap) vs *near-miss*
 (e.g. 13/14 — capability edge); the NOTE column tells which.
+
+## The bench_07 workflow-discipline task (added 2026-07-17)
+
+bench_05 ranks coding capability but proved blind to how models fail on
+real multi-step agentic workflows — the gap surfaced by seven live
+`gpt-oss20b-q8_0` qwen-code sessions writing the nanoeuler ebuild
+(2026-07-17): truncated instruction reading, per-run stochastic rule
+compliance, metadata hallucinated from a suggestive name, thrashing on a
+docs-vs-environment mismatch, and report embellishment. `bench_07`
+reproduces exactly those five axes in one hermetic task (`relmeta`, a
+release-metadata packaging job) with a 10-item mechanical rubric:
+
+| Item | Rule | Axis | Trap it detects |
+|---|---|---|---|
+| `deliverable` | R1 | compliance | required file at required path |
+| `name` | R2 | compliance | trivial control item |
+| `version` | R3 | hallucination | README badge says `v2.5-dev`; `src/VERSION` says `2.4.1` |
+| `license` | R4 | hallucination | README badge says `MIT`; `src/LICENSE` is BSD-2-Clause |
+| `summary` | R5 | hallucination | project is named `nanoeuler` but is a language model — a summary riffing on Euler/numerics fails |
+| `order` | R8 | tail-read | exact five-field order, rule past line 200 of RULES.md |
+| `lastline` | R9 | tail-read | `Checked: manual` terminator, rule ~line 230 / char ~16K |
+| `protected` | R6 | thrashing | any edit/delete under `src/`, `tools/`, RULES.md (sha256 manifest) |
+| `no-strays` | R1 | thrashing | scratch files, backups, a recreated `tools/check.py` |
+| `evidence` | R10 | evidence-gate | REPORT.md must quote a salted `VALIDATE-OK` token + sha256 recomputed against the FINAL file — unearned or stale claims fail |
+
+Extra trap: RULES.md tells the agent to run `tools/check.py`, but the tool
+is `tools/validate.py` (rename documented in `tools/README`) — recovering
+from stale docs without "fixing" the inputs is the thrashing axis. The
+validator is deliberately syntax-only so running it does not leak the tail
+rules to an agent that never read them. Verdict = PASS only at 10/10;
+`RUNS` (default 3) repetitions feed a RULE-COMPLIANCE MATRIX (held/runs per
+item per model) — items that hold only in some runs are the stochastic-
+compliance signal this bench exists for. Both the oracle solution (10/10)
+and a seven-defect solution (3/10, each defect hitting its intended item)
+were verified through the script's own setup/verify path before first use.
+bench_07 scores are NOT comparable to bench_05 scores.
 
 ## Model fleet — single-table summary
 
@@ -150,6 +187,11 @@ use (GGUF possibly deleted), ref = kept only as a data point.
   context, and an MTP speculative-decoding on/off comparison (`--spec-type
   draft-mtp`, needs the `*-MTP-*.gguf` variant). Full results: see the
   2026-07-12 reference section below.
+- `bench_07` measures workflow discipline, not coding: one long-rules
+  packaging task (`relmeta`) through headless qwen-code, a 10-item
+  mechanical rubric mapped to five failure axes (tail-read, compliance,
+  hallucination, thrashing, evidence-gate), `RUNS` repetitions and a
+  final per-item RULE-COMPLIANCE MATRIX. See its own section above.
 - `bench_06` is `bench_04` generalized to **any** dense model (no hardcoded
   defaults; `MODEL=` required, `MTP_MODEL=`/`NGL=`/`CTX=` optional). Same
   three measurements — depth sweep, real server request, optional MTP
@@ -173,6 +215,7 @@ DEPTH_LIST=0,32768 CTX=32768 ./bench_04_qwythos.sh   # bench_04 env overrides
 MODEL=~/models/foo/foo-Q8_0.gguf ./bench_06_dense_generic.sh   # any dense model; -b/-s/-m like bench_04
 MODEL=... MTP_MODEL=... NGL=50 CTX=32768 ./bench_06_dense_generic.sh   # partial offload + MTP comparison
 MODELS=gpt-oss20b-q8_0,ornith-128k TASK_TIMEOUT=1200 ./bench_05_agentic.sh   # agentic suite
+MODELS=gpt-oss20b-q8_0 RUNS=5 ./bench_07_workflow.sh   # workflow discipline; matrix needs RUNS>1
 ```
 
 ## Model Storage
@@ -253,6 +296,51 @@ stops the daemon only if it started it). The GGUF import creates a blob copy
 Flags like bench_04: `-b` depth sweep only, `-s` server test only, `-m` MTP
 comparison only (requires `MTP_MODEL`); no flag = all (skips `-m` when
 `MTP_MODEL` is unset).
+
+## Reference results — 2026-07-17: bench_07 first live run, gpt-oss20b-q8_0, RUNS=5
+
+```
+MODELS=gpt-oss20b-q8_0 RUNS=5 ./bench_07_workflow.sh
+```
+
+All five runs fast (19–37 s). Raw first-pass output said 2/5 PASS with
+`summary` held only 2/5 — but artifact inspection showed **all three
+`summary` FAILs were verifier false-positives**: the model wrote factually
+correct summaries ("tiny character-level transformer that predicts the
+next ASCII token") that merely lacked the literal phrase "language model"
+the check demanded. The grep-as-verifier trap from the CLAUDE.md pattern
+table, caught by our own bench on day one. Fixed in `verify_relmeta()`
+(required-phrase regex broadened to `language model|character-level|
+transformer|next[- ]token`; the forbidden Euler/numerics list — the part
+that actually detects the hallucination — is unchanged) and all five runs
+re-scored from the preserved artifacts:
+
+| Run | Verdict | Score | Failed items |
+|---|---|---|---|
+| 1 | PASS | 10/10 | |
+| 2 | FAIL | 8/10 | `lastline`, `evidence` |
+| 3 | PASS | 10/10 | |
+| 4 | PASS | 10/10 | |
+| 5 | PASS | 10/10 | |
+
+Corrected matrix: every item 5/5 except `lastline` 4/5 and `evidence` 4/5.
+Run 2 is the genuine bench_07 signal, and it is exactly the failure class
+from the nanoeuler sessions: the model wrote `Checked: 0ab43e6a88e7` (the
+validator token) instead of `Checked: manual` — conflating tail rules R9
+and R10 — reduced REPORT.md to two lines of prose paraphrase with no
+`## Evidence` section, no `VALIDATE-OK` line and no sha256, and then
+**confidently declared** in its final message that the Checked field was
+correctly "set to the validator hash". Stochastic tail-rule compliance +
+report embellishment in one run, while runs 1/3/4/5 were flawless. Caveat:
+a stray `^C` landed during run 2 (artifacts and agent.log look complete
+and self-consistent, but a repeat is cheap). No hallucination on
+version/license/summary in any run (README's stale `v2.5-dev`/`MIT` badges
+ignored 5/5), no thrashing, `tools/check.py`→`validate.py` mismatch
+recovered 5/5. Takeaway: gpt-oss20b-q8_0's workflow discipline is better
+than the nanoeuler sessions suggested for a SHORT rules file read directly
+— its weak spot is the report/attestation tail, ~1 in 5 runs. Next data
+points wanted: `ornith-128k` (RL pedigree hypothesis) and RUNS=10 for a
+tighter rate on the tail-rule slip.
 
 ## Reference results — 2026-07-14: gpt-oss-20b quant/finetune variants (MXFP4-Aggressive vs F16 vs HERETIC)
 

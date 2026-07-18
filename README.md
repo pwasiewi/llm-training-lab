@@ -146,6 +146,7 @@ on the same GGUF with MoE CPU/GPU offload tuned for 16 GB VRAM.
 | `bench_04_qwythos.sh` | Qwythos-9B-v2 (dense hybrid): context-depth sweep + server request + MTP on/off comparison |
 | `bench_05_agentic.sh` | agentic coding capability: 12 tasks via headless qwen-code against any aillama profile, objective verdicts + SCORE |
 | `bench_06_dense_generic.sh` | bench_04 generalized to any dense model (`MODEL=` required); per-depth loop survives OOM at deeper values |
+| `bench_07_workflow.sh` | agentic workflow discipline: long-rules packaging task via headless qwen-code, 10-item rubric on 5 failure axes (tail-read, compliance, hallucination, thrashing, evidence-gate), `RUNS`× repetitions + per-item compliance matrix |
 
 > 2026-07-05 (GLM-4.7-Flash 30B-A3B Q4): ik_llama.cpp pp 2106 tok/s (2× mainline),
 > mainline tg 92 tok/s best, ollama far behind (whole-layer offload). Details in BENCH.md.

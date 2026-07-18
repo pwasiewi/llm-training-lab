@@ -21,6 +21,12 @@ python lc_07_gemma2b_imdb.py
 
 # Reproducing BENCH.md results
 
+First get models like that
+```bash
+hf download hf://unsloth/gpt-oss-20b-GGUF/gpt-oss-20b-Q8_0.gguf  --local-dir ~/models/gpt-oss20b-q8_0
+hf download hf://unsloth/gemma-4-12b-it-GGUF/gemma-4-12b-it-Q8_0.gguf --local-dir ~/models/gemma4-12b-q8_0
+```
+
 Exact invocations behind each "Reference results" section of BENCH.md.
 Older sections (before 2026-07-13) are reconstructed from the parameters
 documented there plus script defaults. General rules:
