@@ -49,6 +49,10 @@ WORKROOT="${WORKROOT:-/tmp/bench-agentic}"
 AILLAMA_BIN="${AILLAMA_BIN:-aillama}"
 QWEN_BIN="${QWEN_BIN:-qwen}"
 export QWEN_CODE_SUPPRESS_YOLO_WARNING=1
+# Task prompts run under the "bench" airag identity (set inline at the
+# QWEN_BIN call below); ~/.qwen/hooks/airag-inject.sh skips that entity
+# entirely by default (AIRAG_HOOK_DISABLE_ENTITIES), so a RAG hit can't
+# inject unrelated context mid-task and perturb the verdict/timing.
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -1111,7 +1115,7 @@ run_task() {
 	"setup_$task" "$dir"
 	echo "=== [$model/$task] running (timeout ${TASK_TIMEOUT}s, log: $dir/agent.log) ==="
 	start=$(date +%s)
-	(cd "$dir" && OPENAI_MODEL="$model" timeout "$TASK_TIMEOUT" \
+	(cd "$dir" && OPENAI_MODEL="$model" AIRAG_SOURCE=bench timeout "$TASK_TIMEOUT" \
 		"$QWEN_BIN" -m "$model" --approval-mode yolo -p "$("prompt_$task")" \
 		>"$dir/agent.log" 2>&1) || rc=$?
 	dur=$(( $(date +%s) - start ))

@@ -78,8 +78,11 @@ bench_depth() {
 	local d out
 	IFS=',' read -ra depths <<<"$DEPTH_LIST"
 	for d in "${depths[@]}"; do
+		# column -t realigns pipes: header width assumes a short backend
+		# label, but CUDA+Vulkan+BLAS builds overflow it and shift every
+		# column after "backend" out of alignment otherwise.
 		out=$("$BENCH_BIN" -m "$MODEL" -ngl "$NGL" -fa "$FA_FLAG" -t "$THREADS" \
-			-p 512 -n 128 -d "$d" -r "$REPS" 2>/dev/null | grep -E '^\|') \
+			-p 512 -n 128 -d "$d" -r "$REPS" 2>/dev/null | grep -E '^\|' | column -t -s'|' -o'|') \
 			&& printf '%s\n' "$out" \
 			|| echo "  depth=$d: FAILED (OOM?) — skipped"
 	done

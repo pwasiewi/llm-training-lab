@@ -9,7 +9,7 @@ Why:
 
 Full sequence for llm:
 
-cd /home/pwas/Codex/llm
+cd $HOME/Codex/llm
 
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
@@ -197,4 +197,21 @@ MODEL=$M CTX=65536 SERVER_NCMOE=12 PROMPT_REPEATS=1400 ./bench_02_ikllama.sh -s
 SERVER_NCMOE=18 ./bench_02_ikllama.sh     # ik server needs 18 at 32K on GLM
 ./bench_03_ollama.sh                      # imports GGUF as glm47-flash-q4 (extra ~17 GB!)
 ollama rm glm47-flash-q4                  # cleanup after
+```
+
+
+```bash
+#bench_06 (dense, jeden model na wywołanie, surowa ścieżka GGUF z models.conf):
+MODEL=$HOME/models/gemma4-12b-q8_0/gemma-4-12b-it-Q8_0.gguf ~/Claude/llm/bench_06_dense_generic.sh
+
+MODEL=$HOME/models/gpt-oss-20b-q8_0/gpt-oss-20b-Q8_0.gguf CTX=131072 ~/Claude/llm/bench_06_dense_generic.sh
+#(CTX=131072 bo gpt-oss20b-q8_0 ma w models.conf -c 131072, domyślne CTX w bench_06 to 65536 — zgodne z gemma4-12b-it, więc tam bez override.)
+
+#bench_05 (agentic, oba modele jednym runem — aillama switch per profil):
+MODELS=gemma4-12b-it,gpt-oss20b-q8_0 ~/Claude/llm/bench_05_agentic.sh
+
+#bench_07 (workflow-discipline, domyślnie TASKS=relmeta RUNS=3):
+MODELS=gemma4-12b-it,gpt-oss20b-q8_0 ~/Claude/llm/bench_07_workflow.sh
+
+MODELS=gpt-oss20b-q8_0,gpt-oss20b-udq8kxl RUNS=5 ~/Claude/llm/bench_07_workflow.sh
 ```

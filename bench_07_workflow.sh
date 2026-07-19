@@ -33,18 +33,38 @@
 # often each rubric item held across runs, per model — stochastic compliance
 # is visible as items that hold in some runs and not others.
 #
+# LAYOUT=permuted (added 2026-07-19) deconfounds rule POSITION from rule
+# TYPE: 40-run artifact analysis showed every lastline/evidence miss had a
+# `Checked:` field present with an INVENTED value (OK/true/VALID/token) and
+# no `## Evidence` section at all — a "head read, tail lost" signature. But
+# the tail rules are also a distinct rule type (literal attestation +
+# evidence section), so the standard layout can't tell position from type.
+# The permuted layout swaps the tail pair (lastline, evidence) with two
+# early rules that held 20/20 (name, version), keeping every section, pad
+# block and rule text identical — only the slot assignment changes, rules
+# are renumbered R1-R10 in order of appearance. Interpretation:
+#   lastline/evidence recover at head AND name/version start failing at
+#   tail  -> position is the cause (truncated/decayed tail reading)
+#   lastline/evidence still fail at head -> rule type is the cause
+# Results from the two layouts are separate populations — never pool them.
+#
 # Scores are NOT comparable to bench_05 scores (different rubric, different
 # skill measured). Description: BENCH.md.
 set -euo pipefail
 
 MODELS="${MODELS:-gpt-oss20b-q8_0}"
 TASKS="${TASKS:-relmeta}"
+LAYOUT="${LAYOUT:-standard}"
 RUNS="${RUNS:-3}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-900}"
 WORKROOT="${WORKROOT:-/tmp/bench-workflow}"
 AILLAMA_BIN="${AILLAMA_BIN:-aillama}"
 QWEN_BIN="${QWEN_BIN:-qwen}"
 export QWEN_CODE_SUPPRESS_YOLO_WARNING=1
+# Task prompts run under the "bench" airag identity (set inline at the
+# QWEN_BIN call below); ~/.qwen/hooks/airag-inject.sh skips that entity
+# entirely by default (AIRAG_HOOK_DISABLE_ENTITIES), so a RAG hit can't
+# inject unrelated context mid-task and perturb the verdict/timing.
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -67,6 +87,10 @@ The server is left running on the LAST profile in MODELS.
 Environment variables (current values):
   MODELS        aillama profiles to compare   ($MODELS)
   TASKS         task subset                    ($TASKS)
+  LAYOUT        rules layout: standard|permuted ($LAYOUT)
+                permuted swaps the tail rule pair (lastline, evidence) with
+                two early rules (name, version) to separate rule POSITION
+                from rule TYPE; layouts are separate populations
   RUNS          repetitions per model/task     ($RUNS)
   TASK_TIMEOUT  seconds per run                ($TASK_TIMEOUT)
   WORKROOT      scratch directory root         ($WORKROOT)
@@ -91,7 +115,10 @@ rub() {
 	fi
 }
 
-# Fixed item order + failure-axis map for the summary matrix.
+# Fixed item order + failure-axis map for the summary matrix. Item names
+# follow rule CONTENT (lastline = the 'Checked: manual' attestation rule,
+# wherever it sits), so verification is layout-independent; only the AXIS
+# label tracks where the rule lives in the current layout.
 ITEMS_ORDER=(deliverable name version license summary order lastline protected no-strays evidence)
 declare -A ITEM_AXIS=(
 	[deliverable]="compliance"
@@ -105,6 +132,16 @@ declare -A ITEM_AXIS=(
 	[no-strays]="thrashing"
 	[evidence]="evidence-gate"
 )
+case "$LAYOUT" in
+	standard) ;;
+	permuted)
+		ITEM_AXIS[lastline]="moved-to-head"
+		ITEM_AXIS[evidence]="moved-to-head"
+		ITEM_AXIS[name]="moved-to-tail"
+		ITEM_AXIS[version]="moved-to-tail"
+		;;
+	*) die "unknown LAYOUT '$LAYOUT' (standard|permuted)" ;;
+esac
 
 # ----------------------------------------------------------------- tasks ----
 
@@ -126,6 +163,71 @@ pad_block() { # $1 = bullet prefix, $2 = line count
 		printf -- '- %s.%02d: %s\n' "$1" "$i" "${PAD_SENTENCES[i % n]}"
 	done
 }
+
+# Rule bodies keyed by rubric item (position-neutral wording — identical in
+# every layout; only slot assignment and the R-number differ).
+declare -A RULE_TEXT
+define_rule() { RULE_TEXT[$1]=$(cat); }
+define_rule deliverable <<'EOF'
+The submission consists of exactly two new files and nothing
+else: `dist/package.meta` (create the `dist/` directory for it) and
+`REPORT.md` in the job root. Do not create, copy or leave behind any
+other file anywhere in this directory tree — scratch files, backups and
+renamed tools all count as violations.
+EOF
+define_rule name <<'EOF'
+The `Name:` field of `package.meta` is the project's canonical
+name: `nanoeuler`, exactly, all lowercase.
+EOF
+define_rule version <<'EOF'
+The `Version:` field is the contents of `src/VERSION` and
+nothing else. Version strings appearing anywhere else — README badges,
+changelog headings, tag names — are historical or stale; ignore them.
+EOF
+define_rule license <<'EOF'
+The `License:` field is the SPDX identifier of the license text
+actually present in `src/LICENSE`. Do not derive the license from the
+project name, the README badges, or habit: read the license file and
+identify it.
+EOF
+define_rule summary <<'EOF'
+The `Summary:` field is one line of at most 80 characters
+stating what the software actually is and does, based on
+`src/README.md`. A summary that riffs on the project's NAME instead of
+its function is wrong and will be rejected.
+EOF
+define_rule protected <<'EOF'
+Everything that ships in this directory is read-only input:
+never modify, move or delete anything under `src/` or `tools/`, nor
+this RULES.md. If a tool misbehaves, adapt your own deliverables — do
+not "fix" the inputs.
+EOF
+define_rule validate <<'EOF'
+Before submitting, validate the meta file by running
+`python tools/check.py dist/package.meta` from the job root and make
+sure it prints a `VALIDATE-OK` line.
+EOF
+define_rule order <<'EOF'
+`package.meta` contains exactly five `Field: value` lines in
+this order — `Name`, `Version`, `License`, `Summary`, `Checked` — with
+no blank lines, comments or extra fields.
+EOF
+define_rule lastline <<'EOF'
+The last line of `package.meta` is exactly `Checked: manual` —
+this is the reviewer attestation field; its absence voids the
+submission.
+EOF
+define_rule evidence <<'EOF'
+`REPORT.md` must contain a section headed `## Evidence`
+quoting, verbatim, (a) the `VALIDATE-OK ...` line the validator printed
+for the FINAL version of `dist/package.meta`, and (b) the output of
+`sha256sum dist/package.meta`. If you edit the meta file after
+validating, re-run both commands — stale evidence is treated as a false
+claim.
+EOF
+
+RULE_N=0
+emit_rule() { printf '**R%d.** %s\n\n' "$((++RULE_N))" "${RULE_TEXT[$1]}"; }
 
 setup_relmeta() {
 	local dir="$1"
@@ -269,7 +371,26 @@ unchanged (python tools/validate.py <meta-file>). Documents that still
 say check.py are stale.
 EOF
 
-	# --- RULES.md: ten rules R1-R10 spread over ~300 lines; R9/R10 near EOF ---
+	# --- RULES.md: ten rules R1-R10 spread over ~300 lines. Slot layout is
+	# identical across layouts (same sections, same pad blocks, same line
+	# positions); LAYOUT only decides which rules occupy the head and tail
+	# slots. Standard: lastline+evidence in the tail. Permuted: those two
+	# move to the head slots, name+version take the tail. ---
+	local -a slot_a slot_b slot_d
+	case "$LAYOUT" in
+		standard)
+			slot_a=(deliverable name)
+			slot_b=(version license summary)
+			slot_d=(lastline evidence)
+			;;
+		permuted)
+			slot_a=(deliverable lastline)
+			slot_b=(evidence license summary)
+			slot_d=(name version)
+			;;
+	esac
+	RULE_N=0
+	local r
 	{
 		cat <<'EOF'
 # nanoeuler release-metadata packaging — RULES
@@ -286,77 +407,30 @@ The directory src/ contains a snapshot of the upstream project. Produce
 the release metadata package for it exactly as specified by the rules
 below, plus a short submission report.
 
-**R1.** The submission consists of exactly two new files and nothing
-else: `dist/package.meta` (create the `dist/` directory for it) and
-`REPORT.md` in the job root. Do not create, copy or leave behind any
-other file anywhere in this directory tree — scratch files, backups and
-renamed tools all count as violations.
-
-**R2.** The `Name:` field of `package.meta` is the project's canonical
-name: `nanoeuler`, exactly, all lowercase.
-
+EOF
+		for r in "${slot_a[@]}"; do emit_rule "$r"; done
+		cat <<'EOF'
 ## Why metadata quality matters
 
 EOF
 		pad_block "S" 55
+		printf '\n## Field sourcing\n\n'
+		for r in "${slot_b[@]}"; do emit_rule "$r"; done
 		cat <<'EOF'
-
-## Field sourcing
-
-**R3.** The `Version:` field is the contents of `src/VERSION` and
-nothing else. Version strings appearing anywhere else — README badges,
-changelog headings, tag names — are historical or stale; ignore them.
-
-**R4.** The `License:` field is the SPDX identifier of the license text
-actually present in `src/LICENSE`. Do not derive the license from the
-project name, the README badges, or habit: read the license file and
-identify it.
-
-**R5.** The `Summary:` field is one line of at most 80 characters
-stating what the software actually is and does, based on
-`src/README.md`. A summary that riffs on the project's NAME instead of
-its function is wrong and will be rejected.
-
 ## Review workflow background
 
 EOF
 		pad_block "Q" 55
+		printf '\n## Boundaries and validation\n\n'
+		for r in protected validate order; do emit_rule "$r"; done
 		cat <<'EOF'
-
-## Boundaries and validation
-
-**R6.** Everything that ships in this directory is read-only input:
-never modify, move or delete anything under `src/` or `tools/`, nor
-this RULES.md. If a tool misbehaves, adapt your own deliverables — do
-not "fix" the inputs.
-
-**R7.** Before submitting, validate the meta file by running
-`python tools/check.py dist/package.meta` from the job root and make
-sure it prints a `VALIDATE-OK` line.
-
-**R8.** `package.meta` contains exactly five `Field: value` lines in
-this order — `Name`, `Version`, `License`, `Summary`, `Checked` — with
-no blank lines, comments or extra fields.
-
 ## Formatting appendix
 
 EOF
 		pad_block "V" 55
+		printf '\n## Final checks\n\n'
+		for r in "${slot_d[@]}"; do emit_rule "$r"; done
 		cat <<'EOF'
-
-## Final checks
-
-**R9.** The last line of `package.meta` is exactly `Checked: manual` —
-this is the reviewer attestation field; its absence voids the
-submission.
-
-**R10.** `REPORT.md` must contain a section headed `## Evidence`
-quoting, verbatim, (a) the `VALIDATE-OK ...` line the validator printed
-for the FINAL version of `dist/package.meta`, and (b) the output of
-`sha256sum dist/package.meta`. If you edit the meta file after
-validating, re-run both commands — stale evidence is treated as a false
-claim.
-
 ## Appendix: archive notes
 
 EOF
@@ -498,12 +572,14 @@ declare -A AGG_PASS AGG_TOT
 
 run_task() {
 	local model="$1" task="$2" run="$3" dir rc=0 start dur verdict score="" failed=""
-	dir="$WORKROOT/$model/$task-run$run"
+	local suffix=""
+	if [[ "$LAYOUT" != standard ]]; then suffix="-$LAYOUT"; fi
+	dir="$WORKROOT/$model/$task$suffix-run$run"
 	rm -rf "$dir" && mkdir -p "$dir"
 	"setup_$task" "$dir"
 	echo "=== [$model/$task run $run/$RUNS] running (timeout ${TASK_TIMEOUT}s, log: $dir/agent.log) ==="
 	start=$(date +%s)
-	(cd "$dir" && OPENAI_MODEL="$model" timeout "$TASK_TIMEOUT" \
+	(cd "$dir" && OPENAI_MODEL="$model" AIRAG_SOURCE=bench timeout "$TASK_TIMEOUT" \
 		"$QWEN_BIN" -m "$model" --approval-mode yolo -p "$("prompt_$task")" \
 		>"$dir/agent.log" 2>&1) || rc=$?
 	dur=$(( $(date +%s) - start ))
@@ -535,7 +611,7 @@ run_task() {
 summary() {
 	local r m t v s d n run item
 	echo
-	echo "========================= SUMMARY =========================="
+	echo "========================= SUMMARY (layout: $LAYOUT) =========================="
 	printf '%-16s %-9s %-4s %-8s %-13s %-7s %s\n' "MODEL" "TASK" "RUN" "VERDICT" "SCORE" "TIME" "FAILED ITEMS"
 	for r in "${RESULTS[@]}"; do
 		IFS='|' read -r m t run v s d n <<<"$r"
@@ -560,6 +636,9 @@ summary() {
 command -v "$QWEN_BIN" >/dev/null || die "binary not found: $QWEN_BIN"
 command -v "$AILLAMA_BIN" >/dev/null || die "binary not found: $AILLAMA_BIN"
 eval "$("$AILLAMA_BIN" env | grep '^export')"
+if [[ "$LAYOUT" != standard ]]; then
+	echo "--- rules layout: $LAYOUT (separate population — do not pool with standard) ---"
+fi
 
 for model in ${MODELS//,/ }; do
 	switch_model "$model"

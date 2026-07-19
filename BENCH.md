@@ -93,7 +93,8 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 
 | Profile / model | Arch | Quant, file size | Fit @128K (`--n-cpu-moe`) | tg tok/s | bench_05 weak spots | Status / role |
 |---|---|---|---|---|---|---|
-| `gpt-oss20b-q8_0` | MoE 20.9B | Q8_0, 12.11 GiB | whole (0) | ~214 | regex 57%, interp 71% (14 runs); template never failed | **DEFAULT fast tier** |
+| `gpt-oss20b-udq8kxl` (unsloth UD) | MoE 20.9B | Q8_K_XL, 12.29 GiB | whole (0) | ~193 | interp 3/3, regex 3/3 clean (bench_05); bench_07 ~50% PASS — lastline/evidence weakness shared with q8_0 (base-model trait) | **DEFAULT fast tier** |
+| `gpt-oss20b-q8_0` | MoE 20.9B | Q8_0, 12.11 GiB | whole (0) | ~214 | regex 57%, interp 71% (14+ runs); template never failed | fallback (superseded by udq8kxl, still fastest tg) |
 | `ornith-128k` (Ornith-1.0-35B) | qwen35moe A3B | Q4_K_M, 19.7 GiB | 24 | ~52 | regex never finishes (3/3 TIMEOUT @1200s); rest near-clean | **DEFAULT serious agentic** |
 | `qwythos` (Qwythos-9B-v2 +MTP) | qwen35 dense hybrid | Q8_0 | whole | 149 (MTP) | parser tier FAILs (9B ceiling) | fast iteration on scoped tasks |
 | `ornith-9b` (Ornith-1.0-9B) | qwen35 dense | Q8_0, 9.53 GiB | whole | | interp 12/13 near-miss @900s; perf anti-pattern | accepted; judgment pending |
@@ -107,18 +108,34 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 | `ornith-q5-128k` (Ornith Q5_K_M) | qwen35moe | Q5_K_M, 24 GiB | 22 | −13% vs Q4 | regex TIMEOUT, no file at all | ref — not for time-boxed work |
 | `gemma4-fable5` (yuxinlu1 12B) | gemma4 dense | Q8_0, 12.7 GiB | ctx ≤32K only! | | 5/10; interp 1/13, regex 0/14; gen_n=1 red flag | **REJECTED** |
 | `gemma4-qat` (HauhauCS 12B) | gemma4 dense | Q4_K_M, 7.38 GiB | | | 100% reproducible stream-hang after task 1 | **REJECTED** |
+| `gemma4-12b-it` (unsloth base) | gemma4 dense | Q8_0, 12.7 GiB | ctx ≤65536 only! (131072 OOM) | ~55 | interp+regex 0% TIMEOUT (total parser-tier wipeout); easy/mid 10/12 clean | **REJECTED** |
 | 27B dense family (5 finetunes) | qwen35 dense 65L | Q4, 16–19 GB | impossible @128K (any quant) | | | **REJECTED**, GGUFs deleted (113 GB) |
 | `qwen36u-iq4xs` / `qwen36u-q4kxl` | qwen35moe | 16.5 / 20.8 GiB | 10 / 17 | | scratch FAIL / 2× TIMEOUT | **REJECTED**, deleted (38 GB) |
 | GLM 5.2 (744B) | MoE | any | needs ≥245 GB RAM+VRAM | | | **REJECTED** — never fit |
 
 ### Per-model notes
 
-- **`gpt-oss20b-q8_0`** — the fast-tier default since 2026-07-14/15. gpt-oss
-  keeps MoE experts at native ~4-bit regardless of quant label, so Q8_0
-  costs almost nothing over MXFP4 and still fits whole at 131072 ctx
-  (15.0/16.3 GiB). 14 single-model runs: 6 easy tasks + template at 100%,
+- **`gpt-oss20b-udq8kxl`** — the fast-tier default since 2026-07-19,
+  superseding `gpt-oss20b-q8_0`. unsloth's UD (dynamic) Q8_K_XL quant —
+  finer per-tensor treatment of non-expert tensors than plain Q8_0, 0.18
+  GiB bigger, fits whole at 131072 ctx (14.5/16.3 GiB, -np 1). 3-run repeat
+  targeting the two noisy parser-tier tasks: interp 3/3 PASS, regex 3/3
+  PASS, all 100% — q8_0 FAILed regex twice in the same 3 runs. ~10% slower
+  tg (193 vs 214) is the tradeoff for the clean sweep. **bench_07
+  (2026-07-19, 35 runs/model pooled)**: workflow-discipline is equivalent
+  to q8_0 — udq8kxl 49% vs q8_0 54% PASS, per-axis within 1–2 runs. An
+  apparent regression at N=10–15 dissolved at N=20 (the ranking flipped);
+  the `lastline`/`evidence` weakness (~40–45% miss each) is a gpt-oss-20b
+  base-model trait shared by both quants, to be mitigated in the harness,
+  not by quant choice. bench_07 needs N≥20 before ranking on it.
+- **`gpt-oss20b-q8_0`** — fast-tier default 2026-07-14 → 07-19, now
+  fallback/reference (still the fastest tg in the family). gpt-oss keeps
+  MoE experts at native ~4-bit regardless of quant label, so Q8_0 costs
+  almost nothing over MXFP4 and still fits whole at 131072 ctx (15.0/16.3
+  GiB). 14+ single-model runs: 6 easy tasks + template at 100%,
   codec/toposort 93%, interp 71%, regex 57%. Expect one parser-tier miss
-  per run as the norm, not a clean 12/12.
+  per run as the norm, not a clean 12/12 — confirmed again in the 07-19
+  repeat (regex FAIL twice out of 3).
 - **`ornith-128k`** — RL agentic-coding pedigree (SWE-bench 75.6%); best
   engineering judgment of the fleet (Fenwick tree on perf with 9× margin).
   Weak spot: regex — never converged in any budget tested (900/1200 s);
@@ -147,10 +164,14 @@ use (GGUF possibly deleted), ref = kept only as a data point.
   breaks the fits-whole property (floor 2) and pays 2–6× wall-clock for one
   extra interp pass; HERETIC failed the parser tier outright and was the
   slowest of the family.
-- **gemma4 pair** — new arch loads fine on llama.cpp 9988, so the rejects
-  are model-level: QAT variant has a 100%-reproducible dead-stream bug
-  after the first task; fable5 variant underperforms a 9B and can't hold
-  >32K ctx compute buffers.
+- **gemma4 trio** — new arch loads fine on llama.cpp 9988, so all three
+  rejects are model-level, each for a different reason: QAT variant has a
+  100%-reproducible dead-stream bug after the first task; fable5 variant
+  underperforms a 9B and can't hold >32K ctx compute buffers; the plain
+  unsloth base-instruct variant (`gemma4-12b-it`, not a finetune, infra
+  healthy, no stream-hang) is solid on easy/mid tier but totally wipes out
+  on the parser tier — 0% TIMEOUT on both `interp` and `regex` in a clean
+  re-run, vs `gpt-oss20b-q8_0` clearing all 12 tasks 100% in the same pass.
 - **27B dense family** — architectural VRAM ceiling on 16 GB at 128K: whole
   model never fits (`-ngl 99` OOM even at 4K ctx), partial offload caps at
   ~32K ctx. Independent of finetune and quant; NVFP4 gave no Blackwell
@@ -297,6 +318,113 @@ Flags like bench_04: `-b` depth sweep only, `-s` server test only, `-m` MTP
 comparison only (requires `MTP_MODEL`); no flag = all (skips `-m` when
 `MTP_MODEL` is unset).
 
+## Reference results — 2026-07-19: gpt-oss20b-udq8kxl — new fast-tier default, beats q8_0 on parser-tier reliability
+
+`gpt-oss-20b-UD-Q8_K_XL.gguf` (unsloth/gpt-oss-20b-GGUF, UD dynamic quant,
+12.29 GiB actual — 0.18 GiB bigger than the current default `gpt-oss20b-q8_0`
+at 12.11 GiB). Fits fully in VRAM at 131072 ctx like every other gpt-oss-20b
+quant tested so far (experts stay native precision regardless of the
+non-expert quant label): 14.5/16.3 GiB with `-np 1`, boot + real-request
+clean, no first-decode OOM. Profile `gpt-oss20b-udq8kxl` in
+`~/.aillama/models.conf`.
+
+`bench_06_dense_generic.sh` depth sweep (F16 KV, no `-ctk`/`-ctv` — a
+stricter VRAM test than the deployed server config below, hence the
+d131072 OOM despite the server fitting fine at that depth with quantized
+KV):
+
+| depth | pp512 t/s | tg128 t/s |
+|---|---|---|
+| 0 | 10951.93 ± 3.66 | 207.16 ± 1.59 |
+| 16384 | 8016.58 ± 61.78 | 186.51 ± 3.50 |
+| 65536 | 4024.40 ± 25.27 | 145.78 ± 0.70 |
+| 131072 | FAILED (OOM, unquantized KV) | FAILED (OOM, unquantized KV) |
+
+Server test (quantized KV, matches the deployed profile) @ ctx 131072:
+`prompt_n=683 pp=3437.1 tok/s`, `gen_n=256 tg=188.7 tok/s`. Real-request
+follow-up hit 193.1 tok/s — about 10% below q8_0's ~213-214 tok/s.
+
+**bench_05 agentic, three runs vs `gpt-oss20b-q8_0`** (run 1: full 12-task
+suite; runs 2-3: `TASKS=interp,regex` only, the two tasks with documented
+sampling noise for this model class — `WORKROOT` isolated per run):
+
+| Run | q8_0 interp | q8_0 regex | udq8kxl interp | udq8kxl regex |
+|---|---|---|---|---|
+| 1 (full suite, other 10 tasks 100% both models) | PASS 100% (63s) | **FAIL** — real `SyntaxError` line 406 (43s) | PASS 100% (73s) | PASS 100% (146s) |
+| 2 | PASS 100% (27s) | PASS 100% (467s) | PASS 100% (265s) | PASS 100% (85s) |
+| 3 | PASS 100% (91s) | **FAIL** 12/14 85% — pytest failing (164s) | PASS 100% (156s) | PASS 100% (78s) |
+
+`gpt-oss20b-udq8kxl`: **6/6 clean** across interp+regex over 3 runs, plus a
+clean sweep of the other 10 tasks in run 1 (12/12 that run).
+`gpt-oss20b-q8_0`: 4/6, failing regex twice — consistent with its
+already-documented ~57% historical regex pass rate, not a fluke of this
+session. Same pattern the project has used before to confirm a new default
+(e.g. the two-run repeat that promoted q8_0 over MXFP4 on 2026-07-14).
+
+**Verdict: `gpt-oss20b-udq8kxl` promoted to DEFAULT fast tier**, superseding
+`gpt-oss20b-q8_0` (2026-07-14 → 07-19). `gpt-oss20b-q8_0` remains as
+fallback/reference — still the raw-speed pick (~213 vs ~193 tok/s) when
+regex/interp reliability doesn't matter for the task at hand.
+`~/.aillama/models.conf` updated (CONFIRMED DEFAULT comment moved).
+
+## Reference results — 2026-07-19: gemma4-12b-it (third gemma4 variant) — rejected, total parser-tier failure
+
+`gemma-4-12b-it-Q8_0.gguf` (unsloth/Gemma-4-12B-It-GGUF, 12.67 GB) — confirmed
+via GGUF header scan as the plain Google base instruct model, **not** a
+finetune, so not covered by the `gemma4-fable5`/`gemma4-qat` rejection above.
+Profile `gemma4-12b-it` in `~/.aillama/models.conf` (`-ngl 99 -c 65536 -np 1
+-fa on -ctk q8_0 -ctv q8_0`).
+
+`bench_06_dense_generic.sh` depth sweep (ngl=99, r=2):
+
+| depth | pp512 t/s | tg128 t/s |
+|---|---|---|
+| 0 | 4598.96 ± 270.15 | 57.94 ± 0.15 |
+| 16384 | 3216.47 ± 136.60 | 52.32 ± 0.33 |
+| 65536 | 1811.89 ± 24.79 | 49.81 ± 0.84 |
+| 131072 | FAILED (OOM) | FAILED (OOM) |
+
+Server test @ ctx 65536: `prompt_n=683 pp=3157.1 tok/s`, `gen_n=256 tg=55.2
+tok/s`. Same ctx ceiling as `gemma4-fable5` (32768–65536 reliable, 131072
+OOMs the compute buffer) — architectural, not finetune-specific.
+
+`bench_05_agentic.sh` full 12-task suite vs `gpt-oss20b-q8_0`, clean run (no
+concurrent build this time, unlike the interrupted provisional run the day
+before):
+
+| Task | gemma4-12b-it | gpt-oss20b-q8_0 |
+|---|---|---|
+| bugfix | PASS 100% (35s) | PASS 100% (9s) |
+| scratch | PASS 100% (95s) | PASS 100% (33s) |
+| lru | PASS 100% (98s) | PASS 100% (20s) |
+| multifile | PASS 100% (93s) | PASS 100% (18s) |
+| intervals | PASS 100% (69s) | PASS 100% (14s) |
+| fsm | PASS 100% (70s) | PASS 100% (15s) |
+| codec | PASS 100% (123s) | PASS 100% (28s) |
+| toposort | PASS 100% (72s) | PASS 100% (20s) |
+| template | PASS 100% (697s) | PASS 100% (60s) |
+| interp | **TIMEOUT 0% (900s)** | PASS 100% (146s) |
+| perf | PASS 100% (112s) | PASS 100% (49s) |
+| regex | **TIMEOUT 0% (900s)** | PASS 100% (113s) |
+
+gemma4-12b-it: 10/12 clean, but `interp` and `regex` are a full 900s timeout
+at **0%** — not a near-miss, no partial credit, nothing salvageable at the
+cutoff. This is the same pair of tasks the earlier (VRAM-contaminated,
+interrupted) provisional run flagged, that time dismissed as an infra
+hiccup on `regex` — now reproduced clean, so it's a real, repeatable
+parser-tier capability gap, not noise. `gpt-oss20b-q8_0` passed all 12 tasks
+100% in the same pass, including clean runs of the same two tasks it
+sometimes misses in its own noisy ~40%-FAIL tail (see 2026-07-15 section
+below).
+
+**Verdict: `gemma4-12b-it` REJECTED for agentic use.** Also easy/mid tier
+parity with `gpt-oss20b-q8_0` doesn't offset a complete, reproducible
+inability to finish parser-tier tasks — unlike gpt-oss's occasional tail
+miss, this model never completes them at all. No further repeats planned;
+two independent runs (provisional + clean) landing on the same two 0%
+failures is enough signal. `gpt-oss20b-q8_0` remains the confirmed default
+fast-tier profile.
+
 ## Reference results — 2026-07-17: bench_07 first live run, gpt-oss20b-q8_0, RUNS=5
 
 ```
@@ -341,6 +469,118 @@ than the nanoeuler sessions suggested for a SHORT rules file read directly
 — its weak spot is the report/attestation tail, ~1 in 5 runs. Next data
 points wanted: `ornith-128k` (RL pedigree hypothesis) and RUNS=10 for a
 tighter rate on the tail-rule slip.
+
+## Reference results — 2026-07-19: bench_07 head-to-head, gpt-oss20b-q8_0 vs gpt-oss20b-udq8kxl (RUNS=10, then RUNS=20) — apparent udq8kxl regression dissolves at N=20; weakness is base-model-level
+
+```
+MODELS=gpt-oss20b-q8_0,gpt-oss20b-udq8kxl RUNS=10 ./bench_07_workflow.sh
+```
+
+Follows a standalone `MODELS=gpt-oss20b-udq8kxl RUNS=5` run earlier the same
+day (2/5 PASS = 40%) that first raised the flag. This 10-run head-to-head
+confirms it wasn't a fluke:
+
+| Model | PASS rate | summary (halluc.) | lastline (tail-read) | evidence (evidence-gate) |
+|---|---|---|---|---|
+| `gpt-oss20b-q8_0` | 6/10 (60%) | 8/10 | 6/10 | 6/10 |
+| `gpt-oss20b-udq8kxl` | 4/10 (40%) | **10/10** | 5/10 | **4/10** |
+
+All other rubric items (deliverable, name, version, license, order,
+protected, no-strays) held 10/10 for both models — the entire gap is
+concentrated in three axes. `udq8kxl` fully fixed the hallucination axis
+(no more paraphrase-triggered `summary` misses that plagued q8_0) but is
+*worse* at reading rules near the end of the long RULES.md (`lastline`)
+and *worse* at the evidence-gate (citing a real recomputed sha256/token
+instead of an unearned claim) — combined `lastline,evidence` is the
+dominant FAIL signature for udq8kxl (6 of its 6 FAILs across both sessions
+carry both items together, vs isolated single-item misses for q8_0).
+
+Combined across both udq8kxl sessions today: 6/15 PASS (40%), consistent
+between the standalone 5-run and the head-to-head 10-run.
+
+**CORRECTED the same day by a RUNS=20 head-to-head — the "udq8kxl
+regression" was small-N sampling noise.** Third session, same command with
+`RUNS=20`: udq8kxl **11/20 PASS (55%)** vs q8_0 **9/20 (45%)** — the
+ranking *flipped* relative to the 10-run session. 20-run matrix: lastline
+12/20 vs 11/20, evidence 12/20 vs 10/20, summary 17/20 vs 18/20 — every
+axis within 1–2 runs of each other. One new single-occurrence miss:
+q8_0 dropped `license` once (19/20), first hallucination-axis slip on
+version/license for either model.
+
+Pooled across ALL bench_07 sessions (35 runs per model: udq8kxl 5+10+20;
+q8_0 5 from 07-17 + 10 + 20):
+
+| Metric | udq8kxl | q8_0 |
+|---|---|---|
+| PASS | 17/35 (49%) | 19/35 (54%) |
+| lastline (tail-read) | 20/35 (57%) | 21/35 (60%) |
+| evidence (evidence-gate) | 19/35 (54%) | 20/35 (57%) |
+| summary (hallucination) | 31/35 (89%) | 31/35 (89%) |
+
+Statistically indistinguishable. Revised conclusions:
+
+1. **The `lastline`+`evidence` weakness is a trait of the gpt-oss-20b BASE
+   MODEL (~40–45% miss rate on each), not a quant-level difference** —
+   both Q8_0 and UD-Q8_K_XL land on the same numbers once N is large
+   enough. The dominant FAIL signature (`lastline,evidence` together) is
+   identical for both.
+2. **bench_07 session-level drift is large**: the same q8_0 scored 80% →
+   60% → 45% PASS across three sessions with zero changes. Do not rank
+   models on bench_07 with fewer than ~20 runs; treat 5–10-run deltas as
+   noise. (Same lesson as bench_05 parser-tier, amplified.)
+3. The earlier "udq8kxl fixed the summary axis" claim (10/10 in the 10-run
+   session) also dissolved — pooled it's 89% for both.
+
+**Decision stands: `gpt-oss20b-udq8kxl` remains DEFAULT fast-tier** — it
+won bench_05 decisively and is now shown to be workflow-equivalent to
+q8_0, so there is no trade-off left to weigh. The absolute weakness
+remains real and shared: on long-rules workflows (qwen-code, ebuild
+authoring) expect either quant to miss tail rules / skip the evidence
+gate in roughly 2 of 5 runs — mitigate in the harness (checklist at top
+of file, evidence-gate prompts), not by quant choice.
+
+### Post-hoc artifact analysis (same day): the failure mechanism is "head read, tail lost"
+
+Mining the 40 preserved run directories from the RUNS=20 session settled
+*how* `lastline`/`evidence` fail. In **every** failing run the
+`Checked:` field is PRESENT in `package.meta` — the model knows the field
+exists from the field-order rule R8 (line 168, held 20/20 by both
+models) — but carries an **invented** value: `Checked: OK`, `Checked:
+true`, `Checked: VALID`, or the validator token hash, instead of the
+literal `Checked: manual` demanded by R9 (line 231). And in every one of
+those runs the `## Evidence` section required by R10 (line 235) is
+**absent entirely** (0/13 failing runs have it). So the model is not
+reading the tail rules and ignoring them — the content past ~line 230
+never registers at all, while everything up to at least line 168 does.
+Confound: the tail rules are also a distinct rule *type* (literal
+attestation value + evidence section), so position vs type could not be
+separated from this data alone.
+
+### bench_07 extension: `LAYOUT=permuted` (added 2026-07-19)
+
+New env var `LAYOUT=standard|permuted` in `bench_07_workflow.sh`,
+designed to deconfound rule POSITION from rule TYPE. The permuted layout
+swaps the tail rule pair (`lastline`, `evidence`) with two early rules
+both models held 20/20 (`name`, `version`): the attestation and evidence
+rules become R2 (line 21) and R3 (line 85), while name/version move to
+the tail slots R9/R10 (lines 235/238). Rule wording, sections, pad
+blocks and total length (280 lines) are identical — only slot assignment
+and R-numbering change; the rubric is content-keyed so verification is
+untouched, and the matrix AXIS column shows `moved-to-head` /
+`moved-to-tail` for the four swapped items. Oracle-verified: standard
+layout output is byte-identical to the pre-refactor generator, a perfect
+solution scores 10/10 in both layouts, and the real-world defect
+signature (invented `Checked:` value + missing Evidence section) fails
+exactly `lastline,evidence`. Run dirs get a `-permuted` suffix; permuted
+results are a **separate population** — never pool with standard runs.
+
+Predictions: if `lastline`/`evidence` recover to ~100% at the head AND
+`name`/`version` start failing at ~55–60% in the tail → the ~45% miss is
+positional (truncated/decayed tail reading) and harness mitigations
+(checklist at top) should work. If `lastline`/`evidence` keep failing at
+the head → the rule type itself is hard and prompt-side mitigation needs
+to target attestation/evidence semantics instead. Suggested first run:
+`LAYOUT=permuted MODELS=gpt-oss20b-udq8kxl RUNS=20 ./bench_07_workflow.sh`.
 
 ## Reference results — 2026-07-14: gpt-oss-20b quant/finetune variants (MXFP4-Aggressive vs F16 vs HERETIC)
 

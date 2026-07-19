@@ -81,8 +81,11 @@ bench_sweep() {
 	# when the whole sweep failed.
 	for n in ${NCMOE_LIST//,/ }; do
 		((total++)) || true
+		# column -t realigns pipes: header width assumes a short backend
+		# label, but CUDA+Vulkan+BLAS builds overflow it and shift every
+		# column after "backend" out of alignment otherwise.
 		if ! "$BENCH_BIN" -m "$MODEL" -ngl 99 --n-cpu-moe "$n" -fa "$FA_FLAG" -t "$THREADS" \
-			2>/dev/null | grep -E '^\|'; then
+			2>/dev/null | grep -E '^\|' | column -t -s'|' -o'|'; then
 			echo "UWAGA: bench --n-cpu-moe $n nie powiódł się (OOM?) — kontynuuję sweep" >&2
 			((fails++)) || true
 		fi
