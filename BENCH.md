@@ -582,6 +582,55 @@ the head → the rule type itself is hard and prompt-side mitigation needs
 to target attestation/evidence semantics instead. Suggested first run:
 `LAYOUT=permuted MODELS=gpt-oss20b-udq8kxl RUNS=20 ./bench_07_workflow.sh`.
 
+### Permuted-layout results (2026-07-19, gpt-oss20b-udq8kxl, RUNS=20): position is causal, and tail probes must be unguessable
+
+```
+LAYOUT=permuted MODELS=gpt-oss20b-udq8kxl RUNS=20 ./bench_07_workflow.sh
+```
+
+**19/20 PASS (95%)** vs 55% on the standard layout the same day — and the
+outcome split the two predictions in an instructive way:
+
+| Item | Standard (tail) | Permuted (head) | | Item | Standard (head) | Permuted (tail) |
+|---|---|---|---|---|---|---|
+| lastline | 12/20 (60%) | **20/20** | | name | 20/20 | 20/20 |
+| evidence | 12/20 (60%) | **20/20** | | version | 20/20 | 19/20 |
+
+1. **Position is causal for the attestation/evidence failures.** Moved to
+   the head, `lastline` and `evidence` held 40/40 — the model complies
+   perfectly with the exact same rule text when it actually sees it. The
+   ~40% miss rate in the standard layout is tail loss, not rule
+   difficulty.
+2. **But name/version did NOT collapse in the tail — because tail loss is
+   only VISIBLE through unguessable rules.** `Name: nanoeuler` and
+   `Version: 2.4.1` are inferable from the environment (R8's field list
+   mid-file, `src/VERSION`, CHANGELOG) even if the tail rule is never
+   read, so a lost tail usually produces the right answer anyway. The one
+   `version` FAIL (run 20) is the exception that proves the mechanism:
+   the model wrote `Version: v2.5-dev` — the stale README badge — i.e. a
+   detected tail-loss event where the never-read tail rule ("use
+   src/VERSION, ignore badges") was exactly the thing that would have
+   prevented it. Same run had `Checked: manual` correct (head rule).
+3. **Bench-design lesson: a tail-read probe must be an ARBITRARY literal
+   that cannot be inferred from anything else in the environment.**
+   `Checked: manual` is a strong probe (detects ~40% loss); name/version
+   are weak probes (detect ~5% — only via the badge trap). The true
+   tail-loss rate under the permuted layout is therefore underestimated
+   by its rubric; the layout's purpose (causality test) is served, but it
+   must not be read as "the tail is now fine".
+4. **The harness mitigation is now validated quantitatively**: putting
+   the arbitrary-literal rules at the top of the file is worth ~55%→95%
+   PASS on this model. Direct consequence for real workflows (QWEN.md,
+   SKILL.md, ebuild RULES): state attestation/format literals and
+   evidence requirements in the FIRST screenful; keep only
+   environment-inferable guidance in the tail. Permuted runs are also
+   slightly faster (mean ~26 s vs ~30 s) — the needed rules arrive
+   earlier.
+
+Side observation: `summary` held 20/20 in permuted vs 17-18/20 standard
+despite not moving (slot B in both layouts) — within noise, not
+interpreted.
+
 ## Reference results — 2026-07-14: gpt-oss-20b quant/finetune variants (MXFP4-Aggressive vs F16 vs HERETIC)
 
 Three GGUFs of the same base model (OpenAI gpt-oss-20b, MoE 20.91B params,

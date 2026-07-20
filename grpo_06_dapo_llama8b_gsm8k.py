@@ -4,6 +4,7 @@ os.environ.setdefault("GLOG_minloglevel", "2")          # caffe2/glog: hide INFO
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")  # drop vLLM INFO banner; keep warnings/errors
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
@@ -45,7 +46,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     attn_implementation="flash_attention_2",
     device_map="auto",
     fast_inference=True,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.5,  # 16 GB shared with desktop; 0.8 leaves too little for the training step
     max_lora_rank=lora_rank,
 )
 
@@ -60,15 +61,26 @@ model = FastLanguageModel.get_peft_model(
 )
 
 def extract_hash_answer(text: str) -> str:
-    tag_match = re.search(r'<answer>(.*?)</answer>', text)
+    # Try the <answer> tag first; DOTALL because the trained format puts newlines inside the tags
+    tag_match = re.search(r'<answer>(.*?)</answer>', text, re.DOTALL)
     if tag_match:
         content = tag_match.group(1).strip()
-        if content.replace(',', '').replace('.', '', 1).replace('-', '', 1).isdigit():
-            return content.replace(',', '')
+        # Mixed fraction like "10 1/4"
+        frac = re.fullmatch(r'(-?\d+)\s+(\d+)\s*/\s*(\d+)', content)
+        if frac and int(frac.group(3)) != 0:
+            whole, num, den = frac.groups()
+            value = abs(int(whole)) + int(num) / int(den)
+            return str(-value if whole.startswith('-') else value)
+        # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
+        # then drop comma thousands separators
+        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
+        if re.fullmatch(r'-?\d+(\.\d+)?', norm):
+            return norm
     if "####" in text:
-        return text.split("####")[1].strip()
-    matches = re.findall(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", text)
-    return matches[-1].replace(",", "").strip() if matches else None
+        return text.split("####")[1].strip().replace(",", "")
+    # Fallback: last number in the whole text (comma- or space-grouped thousands accepted)
+    matches = re.findall(r"-?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)(?:\.\d+)?", text)
+    return matches[-1].replace(",", "").replace(" ", "") if matches else None
 
 def get_gsm8k_questions(split="train") -> Dataset:
     data = load_dataset('openai/gsm8k', 'main')[split]
@@ -165,6 +177,12 @@ training_args = GRPOConfig(
     per_device_train_batch_size=4,
     gradient_accumulation_steps=4,
     num_generations=8,    # DAPO: more samples per group for dynamic sampling
+    # 16 GB: TRL scores the whole generation batch (batch x steps_per_generation)
+    # in one logp forward -> OOM in matmul_lora (grpo_03 lesson, 2026-07-20).
+    # Cap at num_generations and chunk the logp forward per sequence.
+    generation_batch_size=8,
+    unsloth_grpo_mini_batch=1,
+    unsloth_logit_chunk_multiplier=16,
     # TRL 1.8 removed max_prompt_length from GRPOConfig; prompts are no longer
     # truncated by the config. vllm_max_model_length sets the vLLM context window
     # (>= max prompt length in the dataset + max_completion_length).

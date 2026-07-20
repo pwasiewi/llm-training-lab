@@ -4,6 +4,7 @@ os.environ.setdefault("GLOG_minloglevel", "2")          # caffe2/glog: hide INFO
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")  # drop vLLM INFO banner; keep warnings/errors
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
@@ -81,22 +82,26 @@ XML_COT_FORMAT = """\
 
 # Function to extract final answer
 def extract_hash_answer(text: str) -> str:
-    # First try to extract from XML tags if present
-    tag_match = re.search(r'<answer>(.*?)</answer>', text)
+    # Try the <answer> tag first; DOTALL because the trained format puts newlines inside the tags
+    tag_match = re.search(r'<answer>(.*?)</answer>', text, re.DOTALL)
     if tag_match:
         content = tag_match.group(1).strip()
-        # Try to convert to number if it's numeric
-        if content.replace(',', '').replace('.', '', 1).replace('-', '', 1).isdigit():
-            return content.replace(',', '')
+        # Mixed fraction like "10 1/4"
+        frac = re.fullmatch(r'(-?\d+)\s+(\d+)\s*/\s*(\d+)', content)
+        if frac and int(frac.group(3)) != 0:
+            whole, num, den = frac.groups()
+            value = abs(int(whole)) + int(num) / int(den)
+            return str(-value if whole.startswith('-') else value)
+        # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
+        # then drop comma thousands separators
+        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
+        if re.fullmatch(r'-?\d+(\.\d+)?', norm):
+            return norm
     if "####" in text:
-        return text.split("####")[1].strip()
-    # Fallback to matching any numbers in the string
-    # Match either:
-    # 1. Numbers with commas (like 1,234,567)
-    # 2. Plain numbers without commas (like 20000)
-    matches = re.findall(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", text)
-    return matches[-1].replace(",", "").strip() if matches else None
-
+        return text.split("####")[1].strip().replace(",", "")
+    # Fallback: last number in the whole text (comma- or space-grouped thousands accepted)
+    matches = re.findall(r"-?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)(?:\.\d+)?", text)
+    return matches[-1].replace(",", "").replace(" ", "") if matches else None
 
 def get_gsm8k_questions(split="train") -> Dataset:
     data = load_dataset('openai/gsm8k', 'main')[split]

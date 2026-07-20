@@ -4,6 +4,7 @@ os.environ.setdefault("GLOG_minloglevel", "2")          # caffe2/glog: hide INFO
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")  # drop vLLM INFO banner; keep warnings/errors
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
@@ -72,10 +73,26 @@ XML_COT_FORMAT = """\
 
 # Load dataset
 def extract_hash_answer(text: str) -> str:
+    # Try the <answer> tag first; DOTALL because the trained format puts newlines inside the tags
+    tag_match = re.search(r'<answer>(.*?)</answer>', text, re.DOTALL)
+    if tag_match:
+        content = tag_match.group(1).strip()
+        # Mixed fraction like "10 1/4"
+        frac = re.fullmatch(r'(-?\d+)\s+(\d+)\s*/\s*(\d+)', content)
+        if frac and int(frac.group(3)) != 0:
+            whole, num, den = frac.groups()
+            value = abs(int(whole)) + int(num) / int(den)
+            return str(-value if whole.startswith('-') else value)
+        # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
+        # then drop comma thousands separators
+        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
+        if re.fullmatch(r'-?\d+(\.\d+)?', norm):
+            return norm
     if "####" in text:
-        return text.split("####")[1].strip()
-    match = re.findall(r"-?\d+\.?\d*", text)
-    return match[-1] if match else None
+        return text.split("####")[1].strip().replace(",", "")
+    # Fallback: last number in the whole text (comma- or space-grouped thousands accepted)
+    matches = re.findall(r"-?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)(?:\.\d+)?", text)
+    return matches[-1].replace(",", "").replace(" ", "") if matches else None
 
 def get_gsm8k_questions(split="train") -> Dataset:
     data = load_dataset('openai/gsm8k', 'main')[split]

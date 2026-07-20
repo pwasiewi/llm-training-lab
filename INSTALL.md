@@ -214,4 +214,13 @@ MODELS=gemma4-12b-it,gpt-oss20b-q8_0 ~/Claude/llm/bench_05_agentic.sh
 MODELS=gemma4-12b-it,gpt-oss20b-q8_0 ~/Claude/llm/bench_07_workflow.sh
 
 MODELS=gpt-oss20b-q8_0,gpt-oss20b-udq8kxl RUNS=5 ~/Claude/llm/bench_07_workflow.sh
+LAYOUT=permuted MODELS=gpt-oss20b-udq8kxl RUNS=20 ~/Claude/llm/bench_07_workflow.sh
+```
+
+## new grpo lora
+
+```bash
+UNSLOTH_GPTOSS_GROUPED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup python grpo_09_gptoss20b_gsm8k.py > grpo09_headless.log 2>&1 &
+tail -f grpo09_headless.log      
+
 ```

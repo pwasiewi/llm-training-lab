@@ -1,7 +1,28 @@
+# GRPO on gpt-oss-20b (the HF base of the served gpt-oss20b-udq8kxl GGUF).
+#
+# Key differences vs the qwen/llama scripts in this suite (16 GB VRAM budget):
+# - fast_inference=False: colocated vLLM cannot fit a 20B next to the training
+#   step on 16 GB (bnb-4bit weights alone are ~12 GB). Unsloth's own generate
+#   path is the one their "gpt-oss-20b GRPO in ~15 GB" claim uses.
+# - LoRA on attention only: the MoE expert tensors are quantized (MXFP4/bnb)
+#   and touching experts/router degrades routing (see project_gptoss_mxfp4_distill);
+#   vLLM/unsloth LoRA on fused-MoE weights is also the historically broken path.
+# - gpt_oss is on unsloth's FORCE_FLOAT32 list (no fp16); bf16 autocast is fine
+#   on this GPU (Blackwell).
+# - First run downloads ~13 GB of base weights into the HF cache.
+# - Stop aillama (`aillama stop`) and check `nvidia-smi` before starting:
+#   the desktop already holds ~1.6-2 GiB of the 16 GB.
+# - Attention MUST be flex attention (verified: triton_flex_attention_backward in
+#   logs). Flash Attention 3 silently corrupts gpt-oss training loss (no backward
+#   for attention sinks — unsloth docs). Not installed here; on rented cloud
+#   images check `python -c "import flash_attn_interface"` fails or disable FA3.
+# - Official recipe reference (unsloth docs, gpt-oss RL): fits Colab T4 15 GB
+#   HEADLESS; rollout speed there ~21 tok/s 4-bit. Our per-expert path = 1-2 tok/s;
+#   headless + UNSLOTH_GPTOSS_GROUPED=1 should approach recipe parity.
+
 # --- Silence cosmetic third-party startup noise (must run before heavy imports) ---
 import os, warnings, logging
-os.environ.setdefault("GLOG_minloglevel", "2")          # caffe2/glog: hide INFO+WARNING (GroupedMMUtils fallback, InitGoogleLogging)
-os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")  # drop vLLM INFO banner; keep warnings/errors
+os.environ.setdefault("GLOG_minloglevel", "2")          # caffe2/glog: hide INFO+WARNING
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
@@ -9,42 +30,41 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
 logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
+# gpt-oss MoE: the default "grouped" path dequantizes ALL 32 experts into
+# torch._grouped_mm stacks (~1.6 GB transient PER MLP layer) - the actual cause
+# of the 16 GB OOMs regardless of sequence length. Default to the per-expert eager
+# loop instead (~33 MB transients, but ~1-2 tok/s decode). Headless (no desktop on
+# the GPU) run with UNSLOTH_GPTOSS_GROUPED=1 to try the fast grouped path.
+os.environ.setdefault("UNSLOTH_GPTOSS_GROUPED", "0")
 # ----------------------------------------------------------------------------------
 
 from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
 import re
-import os
 from datasets import load_dataset, Dataset
 
-# No-ops in vLLM 9999 (V1 engine + FlashAttention v2 are selected regardless);
-# leaving them set only triggers "Unknown vLLM environment variable" warnings.
-# os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
-# os.environ["VLLM_USE_V1"] = "0"
-
 # Load model & tokenizer
-model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-model_path = "outputs/lora-grpo-qwen3"
-max_seq_length = 2048
-max_prompt_length = 1024
-lora_rank = 64
+model_name = "unsloth/gpt-oss-20b"  # load_in_4bit=True routes to the -unsloth-bnb-4bit repo
+model_path = "outputs/lora-grpo-gptoss20b"
+max_seq_length = 768    # OOM at 1536/1024/896 (2026-07-19): logprob buffers scale with completion
+                        # tokens, and the desktop's VRAM share fluctuates 0.7-1.1 GiB on top
+max_prompt_length = 384  # GSM8K prompt + harmony template overhead is ~250 tokens
+lora_rank = 8           # attention-only LoRA needs far less rank than the full-mlp 64 used on 1.5B
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
-    load_in_4bit=True,  # Set to False for full precision
-    fast_inference=True,
-    max_lora_rank=lora_rank,
-    gpu_memory_utilization=0.5,  # 0.8 left too little VRAM for the colocated training step (OOM at step 12 on 16 GB)
+    load_in_4bit=True,
+    fast_inference=False,     # no colocated vLLM: 20B does not fit next to training on 16 GB
+    offload_embedding=True,   # moves embed_tokens/lm_head off-GPU; part of the ~15 GB recipe
 )
 
-# Apply LoRA
+# Apply LoRA — attention projections only (see header for why experts stay frozen)
 model = FastLanguageModel.get_peft_model(
     model,
     r=lora_rank,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"],
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
     lora_alpha=lora_rank,
     use_gradient_checkpointing="unsloth",
     random_state=3407,
@@ -84,7 +104,7 @@ def extract_hash_answer(text: str) -> str:
             return str(-value if whole.startswith('-') else value)
         # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
         # then drop comma thousands separators
-        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
+        norm = re.sub(r'[$€£\s]', '', content).replace(',', '')
         if re.fullmatch(r'-?\d+(\.\d+)?', norm):
             return norm
     if "####" in text:
@@ -97,7 +117,9 @@ def get_gsm8k_questions(split="train") -> Dataset:
     data = load_dataset('openai/gsm8k', 'main')[split]
     return data.map(lambda x: {
         'prompt': [
-            {'role': 'system', 'content': "You are a helpful assistant that always responds with reasoning and answer tags."},
+            # "Keep your reasoning brief": harmony's analysis channel must fit the tight
+            # 384-token completion budget, or truncation drops the final answer entirely
+            {'role': 'system', 'content': "You are a helpful assistant that always responds with reasoning and answer tags. Keep your reasoning brief."},
             {'role': 'user', 'content': f"Please solve the following problem and respond in this format:\n<reasoning>...</reasoning>\n<answer>...</answer>\n\nProblem:\n{x['question']}"}
         ],
         'answer': extract_hash_answer(x['answer'])
@@ -110,12 +132,11 @@ def safe_float(x):
     try:
         return float(x.replace(",", "").strip())
     except:
-        return None  # or float('nan') if you prefer
+        return None
 
 def correctness_reward_func(prompts, completions, answer, **kwargs):
     responses = [c[0]['content'] for c in completions]
     extracted_responses = [extract_hash_answer(r) for r in responses]
-    #print('-'*20, f"Question:\n{q}", f"\nAnswer:\n{answer[0]}", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted_responses[0]}")
     return [2.0 if safe_float(r) == safe_float(a) else 0.0 for r, a in zip(extracted_responses, answer)]
 
 def is_integer_like(s):
@@ -130,13 +151,10 @@ def int_reward_func(completions, **kwargs) -> list[float]:
     extracted_responses = [extract_hash_answer(r) for r in responses]
     return [0.5 if is_integer_like(r) else 0.0 for r in extracted_responses]
 
-def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion has a specific format."""
-    pattern = r"^<reasoning>\s*.*?\s*</reasoning>\s*<answer>\s*.*?\s*</answer>\s*$"
-    responses = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses]
-    return [0.5 if match else 0.0 for match in matches]
-
+# No strict (^...$-anchored) format reward here: gpt-oss emits its Harmony
+# analysis channel before the final message, so the decoded completion never
+# STARTS with <reasoning>. The soft reward still shapes the tags in the final
+# channel; xmlcount rewards partial tag emission.
 def soft_format_reward_func(completions, **kwargs) -> list[float]:
     """Reward function that checks if the completion has a specific format."""
     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
@@ -158,12 +176,11 @@ def count_xml(text: str) -> float:
 
 def xmlcount_reward_func(completions, **kwargs) -> list[float]:
     contents = [completion[0]["content"] for completion in completions]
-    #print(contents)
     return [count_xml(c) for c in contents]
 
 # Training arguments
 training_args = GRPOConfig(
-    use_vllm=True,
+    use_vllm=False,  # matches fast_inference=False above
     learning_rate=5e-6,
     adam_beta1=0.9,
     adam_beta2=0.99,
@@ -173,17 +190,24 @@ training_args = GRPOConfig(
     optim="paged_adamw_8bit",
     logging_steps=1,
     bf16=is_bfloat16_supported(),
-    fp16=not is_bfloat16_supported(),
-    per_device_train_batch_size=4,  # Increased for stability
-    gradient_accumulation_steps=8,  # Adjusted for memory
+    fp16=False,  # gpt_oss is FORCE_FLOAT32: fp16 produces NaN grad norms
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
     num_generations=2,
-    # TRL 1.8 removed max_prompt_length from GRPOConfig; prompts are no longer
-    # truncated by the config. vllm_max_model_length sets the vLLM context window
-    # (>= max prompt length in the dataset + max_completion_length).
-    max_completion_length=max_seq_length - max_prompt_length,
-    vllm_max_model_length=max_seq_length,
-    num_train_epochs=2,
-    # max_steps=1000,
+    max_completion_length=max_seq_length - max_prompt_length,  # analysis channel + final must fit in 512
+    # Logprob computation materializes (tokens/chunks, 201088-vocab) logit buffers,
+    # where chunks = rows_per_forward x multiplier. The autotuner (80% of free VRAM
+    # at first step) picked multiplier=4 and OOMed ~140 MiB short on 16 GB; pin the
+    # sizing explicitly instead of letting it guess.
+    unsloth_grpo_mini_batch=1,
+    unsloth_logit_chunk_multiplier=16,
+    # Generate 2 sequences per call instead of the default batch x steps_per_generation
+    # (=8): the eval-mode MoE path computes ALL experts over ALL prefill tokens, so
+    # generation transients scale with this. Same total work, 4x smaller peaks.
+    generation_batch_size=2,
+    # A full epoch at 20B generate speed is days on this GPU; probe with a
+    # bounded run first and continue via grpo_09_gptoss20b_gsm8k_cont.py.
+    max_steps=300,
     save_strategy="steps",
     save_steps=50,
     max_grad_norm=0.1,
@@ -197,7 +221,6 @@ trainer = GRPOTrainer(
     reward_funcs=[
         xmlcount_reward_func,
         soft_format_reward_func,
-        strict_format_reward_func,
         int_reward_func,
         correctness_reward_func,
     ],
@@ -205,18 +228,18 @@ trainer = GRPOTrainer(
     train_dataset=dataset,
 )
 
-# vLLM engine init (attention backend selector) permanently lowers
-# torch._dynamo.config.recompile_limit to 16, clobbering unsloth's 1024.
-# Worse: config writes land in a ContextVar, so other threads (autograd
-# engine recomputing checkpointed forwards during backward) fall back to
-# the DEFAULT of 8 -> FailOnRecompileLimitHit on unsloth's fullgraph=True
-# compiled RMSNorm. Restore the main-thread override AND raise the default
-# so every thread sees 1024.
+# Raise the dynamo recompile limit (default 8) and its ContextVar DEFAULT so
+# autograd-engine threads see it too. Needed even without vLLM: the per-expert
+# MoE loop recompiles unsloth's fullgraph=True kernels for varying per-expert
+# token counts and blows past 8 within the first steps (FailOnRecompileLimitHit).
 import torch._dynamo
 torch._dynamo.config.recompile_limit = 1024
 torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train()
 
-# Save final model
-model.save_pretrained_merged(model_path, tokenizer, save_method="merged_16bit")
+# Save the LoRA adapter only. merged_16bit of a 20B is ~40 GB and does not fit
+# the current free disk; for serving, export to GGUF (experts stay MXFP4, ~14 GB)
+# and register it in ~/.aillama/models.conf instead.
+model.save_pretrained(model_path)
+tokenizer.save_pretrained(model_path)

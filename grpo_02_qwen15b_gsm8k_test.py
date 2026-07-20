@@ -1,3 +1,5 @@
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation; must precede first CUDA alloc
 # Import necessary libraries
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -40,21 +42,27 @@ def generate_answer(question, model, tokenizer, max_length=512):
     return output  # No need to decode
 
 # Function to extract final numerical answer
-def extract_final_answer(answer):
-    # First try to extract from XML tags if present
-    tag_match = re.search(r'<answer>(.*?)</answer>', answer)
+def extract_final_answer(text: str) -> str:
+    # Try the <answer> tag first; DOTALL because the trained format puts newlines inside the tags
+    tag_match = re.search(r'<answer>(.*?)</answer>', text, re.DOTALL)
     if tag_match:
         content = tag_match.group(1).strip()
-        # Try to convert to number if it's numeric
-        if content.replace(',', '').replace('.', '', 1).replace('-', '', 1).isdigit():
-            return content.replace(',', '')
-
-    # Fallback to matching any numbers in the string
-    # Match either:
-    # 1. Numbers with commas (like 1,234,567)
-    # 2. Plain numbers without commas (like 20000)
-    matches = re.findall(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", answer)
-    return matches[-1].replace(",", "").strip() if matches else None
+        # Mixed fraction like "10 1/4"
+        frac = re.fullmatch(r'(-?\d+)\s+(\d+)\s*/\s*(\d+)', content)
+        if frac and int(frac.group(3)) != 0:
+            whole, num, den = frac.groups()
+            value = abs(int(whole)) + int(num) / int(den)
+            return str(-value if whole.startswith('-') else value)
+        # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
+        # then drop comma thousands separators
+        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
+        if re.fullmatch(r'-?\d+(\.\d+)?', norm):
+            return norm
+    if "####" in text:
+        return text.split("####")[1].strip().replace(",", "")
+    # Fallback: last number in the whole text (comma- or space-grouped thousands accepted)
+    matches = re.findall(r"-?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)(?:\.\d+)?", text)
+    return matches[-1].replace(",", "").replace(" ", "") if matches else None
 
 def safe_float(x):
     try:
