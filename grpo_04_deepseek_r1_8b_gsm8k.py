@@ -47,6 +47,27 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     max_lora_rank=lora_rank,
 )
 
+def ensure_bytelevel_tokenizer(tok):
+    # transformers 5.x rebuilds LlamaTokenizerFast in sentencepiece style, ignoring the
+    # ByteLevel decoder in tokenizer.json. On this byte-level BPE vocab that corrupts both
+    # directions: encode drops spaces from prompts, decode leaks raw Ġ/Ċ markers into the
+    # reward functions (format rewards go to 0). Reload verbatim from tokenizer.json when
+    # the round-trip fails. This only heals the HF-side tokenizer — run
+    # `grpo-fix-hf-tokenizer fix` to repair the cached config that vLLM loads on its own.
+    probe = "a b,\nc d"
+    out = tok.decode(tok(probe, add_special_tokens=False).input_ids, skip_special_tokens=True)
+    if out.strip() == probe:
+        return tok
+    from transformers import PreTrainedTokenizerFast
+    print(f"WARNING: broken byte-level tokenizer from {tok.name_or_path}; "
+          "reloading via PreTrainedTokenizerFast — run 'grpo-fix-hf-tokenizer fix' to repair the HF cache")
+    fixed = PreTrainedTokenizerFast.from_pretrained(tok.name_or_path)
+    if fixed.pad_token is None:
+        fixed.pad_token = tok.pad_token or fixed.eos_token
+    return fixed
+
+tokenizer = ensure_bytelevel_tokenizer(tokenizer)
+
 model = FastLanguageModel.get_peft_model(
     model,
     r=lora_rank,
@@ -106,11 +127,22 @@ def safe_float(x):
     except:
         return None
 
+_gen_batch = 0  # one reward call = one generation round (num_generations completions of one prompt)
+
+def _progress():
+    global _gen_batch
+    _gen_batch += 1
+    st = trainer.state if "trainer" in globals() else None
+    s = f"batch {_gen_batch}/{len(dataset)}"
+    if st is not None and st.epoch is not None:
+        s += f" | step {st.global_step}/{st.max_steps} | left {st.max_steps - st.global_step} steps | epoch {st.epoch:.3f}"
+    return s
+
 def correctness_reward_func(prompts, completions, answer, **kwargs):
     responses = [c[0]['content'] for c in completions]
     extracted = [extract_hash_answer(r) for r in responses]
-    print('-'*20, f"Question:\n{prompts[0]}", f"\nResponse:\n{responses[0]}",
-          f"\nExtracted:\n{extracted[0]}", f"\nAnswer:\n{answer[0]}")
+    print('-'*20, f"[{_progress()}]", f"\nQuestion:\n{prompts[0]}", f"\nResponse:\n{responses[0]}",
+          f"\nExtracted:\n{extracted[0]}", f"\nAnswer:\n{answer[0]}", flush=True)
     return [2.0 if safe_float(r) == safe_float(a) else 0.0 for r, a in zip(extracted, answer)]
 
 def is_integer_like(s):
@@ -194,6 +226,79 @@ trainer = GRPOTrainer(
     args=training_args,
     train_dataset=dataset,
 )
+
+# Validate token ids coming out of generation before they reach the compiled
+# logprob gather. An out-of-vocab id there dies as an async device-side assert
+# ("index out of bounds: 0 <= tmp0 < 128256") with no python traceback, so fail
+# early here with the actual offending values instead.
+_vocab_size = model.config.vocab_size
+
+# Weight probe for the NaN causal-chain hypothesis (NaN logps -> NaN LoRA
+# weights -> NaN vLLM logits -> garbage sampled ids). Scans the training model
+# (4-bit base is uint8 and skipped; LoRA A/B and norms are floating and
+# checked) plus the colocated vLLM weight copy before every generation round,
+# i.e. right after the previous optimizer step. The vLLM copy still holds the
+# adapter synced for the *previous* round at that point, which is fine: the log
+# ordering vs NAN-WATCH shows which link breaks first. Attribute paths match
+# unsloth_zoo.vllm_utils (vLLM V1 and V0 layouts).
+def _find_vllm_model():
+    eng = getattr(model, "vllm_engine", None)
+    if eng is None:
+        return None
+    for path in ("engine_core.engine_core.model_executor.driver_worker.model_runner.model",
+                 "model_executor.driver_worker.model_runner.model"):
+        obj = eng.llm_engine
+        try:
+            for attr in path.split("."):
+                obj = getattr(obj, attr)
+            return obj
+        except AttributeError:
+            continue
+    return None
+
+_vllm_model = _find_vllm_model()
+
+def _scan_weights(mod, tag):
+    bad = [n for n, p in mod.named_parameters()
+           if p.is_floating_point() and not torch.isfinite(p).all().item()]
+    if bad:
+        print(f"WEIGHT-WATCH: non-finite weights in {tag} at step "
+              f"{trainer.state.global_step if trainer.state is not None else '?'}: "
+              f"{bad[:5]}{' ...' if len(bad) > 5 else ''} ({len(bad)} tensors)",
+              flush=True)
+    return bool(bad)
+
+print("WEIGHT-WATCH armed: train-side LoRA"
+      + (" + vLLM weight copy" if _vllm_model is not None
+         else " (vLLM internals NOT reachable — vLLM copy unchecked)"),
+      flush=True)
+
+_orig_prepare_inputs = trainer._prepare_inputs
+def _checked_prepare_inputs(*args, **kwargs):
+    _scan_weights(model, "train model")
+    if _vllm_model is not None:
+        _scan_weights(_vllm_model, "vLLM copy")
+    out = _orig_prepare_inputs(*args, **kwargs)
+    if isinstance(out, dict):
+        for key, t in out.items():
+            if not torch.is_tensor(t):
+                continue
+            if t.is_floating_point():
+                # NaN logps precede NaN LoRA weights -> NaN vLLM logits -> garbage
+                # sampled ids; warn early so the causal chain is visible in the log.
+                if torch.isnan(t).any().item():
+                    print(f"NAN-WATCH: NaN in '{key}' at step {trainer.state.global_step}")
+            elif "ids" in key:
+                mn, mx = t.min().item(), t.max().item()
+                if mn < 0 or mx >= _vocab_size:
+                    torch.save({k: v for k, v in out.items() if torch.is_tensor(v)},
+                               "/tmp/grpo04_bad_batch.pt")
+                    raise RuntimeError(
+                        f"out-of-vocab token id in '{key}': min={mn} max={mx} "
+                        f"(vocab={_vocab_size}) at step {trainer.state.global_step}; "
+                        f"batch dumped to /tmp/grpo04_bad_batch.pt")
+    return out
+trainer._prepare_inputs = _checked_prepare_inputs
 
 def check_lengths(dataset, tokenizer, max_prompt_length, max_seq_length):
     too_long_prompt = 0

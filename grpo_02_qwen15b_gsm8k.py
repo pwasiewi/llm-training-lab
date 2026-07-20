@@ -112,7 +112,19 @@ def safe_float(x):
     except:
         return None  # or float('nan') if you prefer
 
+_gen_batch = 0  # one reward call = one generation round (num_generations completions of one prompt)
+
+def _progress():
+    global _gen_batch
+    _gen_batch += 1
+    st = trainer.state if "trainer" in globals() else None
+    s = f"batch {_gen_batch}/{len(dataset)}"
+    if st is not None and st.epoch is not None:
+        s += f" | step {st.global_step}/{st.max_steps} | left {st.max_steps - st.global_step} steps | epoch {st.epoch:.3f}"
+    return s
+
 def correctness_reward_func(prompts, completions, answer, **kwargs):
+    print('-'*20, f"[{_progress()}]", flush=True)
     responses = [c[0]['content'] for c in completions]
     extracted_responses = [extract_hash_answer(r) for r in responses]
     #print('-'*20, f"Question:\n{q}", f"\nAnswer:\n{answer[0]}", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted_responses[0]}")

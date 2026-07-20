@@ -1,0 +1,9 @@
+outputs/
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+.claude
+.idea

@@ -107,10 +107,21 @@ def safe_float(x):
     except:
         return None
 
+_gen_batch = 0  # one reward call = one generation round (num_generations completions of one prompt)
+
+def _progress():
+    global _gen_batch
+    _gen_batch += 1
+    st = trainer.state if "trainer" in globals() else None
+    s = f"batch {_gen_batch}/{len(dataset)}"
+    if st is not None and st.epoch is not None:
+        s += f" | step {st.global_step}/{st.max_steps} | left {st.max_steps - st.global_step} steps | epoch {st.epoch:.3f}"
+    return s
+
 def correctness_reward_func(prompts, completions, answer, **kwargs):
     responses = [c[0]['content'] for c in completions]
     extracted = [extract_answer(r) for r in responses]
-    print('-'*20, f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted[0]}", f"\nAnswer:\n{answer[0]}")
+    print('-'*20, f"[{_progress()}]", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted[0]}", f"\nAnswer:\n{answer[0]}", flush=True)
     return [2.0 if safe_float(r) == safe_float(a) else 0.0 for r, a in zip(extracted, answer)]
 
 def is_integer_like(s):

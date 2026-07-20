@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""fix-hf-tokenizer — detect and repair broken tokenizer loading in the HF cache.
+
+transformers 5.x rebuilds some tokenizer classes (e.g. LlamaTokenizerFast) in
+sentencepiece style, ignoring the ByteLevel decoder shipped in tokenizer.json.
+On byte-level BPE vocabs this silently corrupts BOTH directions:
+  - encode: spaces vanish from prompts ("Hello world" -> 'H','elloworld')
+  - decode: raw BPE markers leak into text (Ġ=space, Ċ=newline)
+Known victim: deepseek-ai/DeepSeek-R1-Distill-Llama-8B (and unsloth mirrors).
+
+The fix: set tokenizer_class to "PreTrainedTokenizerFast" in the cached
+tokenizer_config.json so every loader (transformers, unsloth, vLLM, TRL)
+takes tokenizer.json verbatim. Re-downloading the model restores the broken
+config, so re-run this after downloads (it is idempotent and probe-driven:
+models that round-trip correctly are never touched).
+"""
+
+import argparse
+import glob
+import json
+import os
+import sys
+import tempfile
+import warnings
+
+HUB = os.path.join(
+    os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub"
+)
+# Round-trip probe: spaces, newline, comma-grouped decimal — covers the
+# byte-level markers (Ġ/Ċ) and number formats the GSM8K reward parsers rely on.
+PROBE = "a b,\nc d 6,520.20"
+FIXED_CLASS = "PreTrainedTokenizerFast"
+
+
+def die(msg):
+    print(f"fix-hf-tokenizer: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def model_id(snapshot_dir):
+    return snapshot_dir.split("models--")[1].split("/snapshots")[0].replace("--", "/", 1)
+
+
+def probe_ok(snapshot_dir):
+    """Return True when encode->decode round-trips the probe string."""
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(snapshot_dir)
+    out = tok.decode(tok(PROBE, add_special_tokens=False).input_ids, skip_special_tokens=True)
+    return out.strip() == PROBE
+
+
+def snapshots():
+    pattern = os.path.join(HUB, "models--*", "snapshots", "*", "tokenizer_config.json")
+    for cfg in sorted(glob.glob(pattern)):
+        yield os.path.dirname(cfg)
+
+
+def rewrite_config(snapshot_dir, new_class):
+    """Replace tokenizer_class, writing a regular file over the snapshot symlink
+    so the content-addressed blob it pointed to stays intact."""
+    cfg_path = os.path.join(snapshot_dir, "tokenizer_config.json")
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    old_class = cfg.get("tokenizer_class")
+    cfg["tokenizer_class"] = new_class
+    fd, tmp = tempfile.mkstemp(dir=snapshot_dir, suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, cfg_path)  # replaces the symlink itself, not the blob
+    return old_class
+
+
+def run(apply):
+    from transformers import AutoTokenizer  # noqa: F401 — fail early if missing
+
+    broken = fixed = skipped = 0
+    for snap in snapshots():
+        mid = model_id(snap)
+        try:
+            if probe_ok(snap):
+                print(f"OK      {mid}")
+                continue
+        except Exception as e:
+            print(f"ERROR   {mid}: {type(e).__name__}: {e}")
+            continue
+        broken += 1
+        if not os.path.exists(os.path.join(snap, "tokenizer.json")):
+            print(f"BROKEN  {mid} — no tokenizer.json, cannot fix, skipping")
+            skipped += 1
+            continue
+        if not apply:
+            print(f"BROKEN  {mid} — would set tokenizer_class={FIXED_CLASS} (run 'fix' to apply)")
+            continue
+        old_class = rewrite_config(snap, FIXED_CLASS)
+        if probe_ok(snap):
+            print(f"FIXED   {mid} ({old_class} -> {FIXED_CLASS})")
+            fixed += 1
+        else:
+            rewrite_config(snap, old_class)
+            print(f"BROKEN  {mid} — {FIXED_CLASS} did not fix it, reverted to {old_class}")
+            skipped += 1
+    if apply and broken:
+        print(f"\n{fixed} fixed, {skipped} not fixable, out of {broken} broken")
+    if not apply and broken:
+        print(f"\n{broken} broken tokenizer(s) found — run: fix-hf-tokenizer fix")
+    return 0 if broken == skipped == 0 or (apply and fixed == broken) else 1
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="fix-hf-tokenizer",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "command", nargs="?", choices=["scan", "fix"],
+        help="scan: probe all cached tokenizers (read-only); fix: patch the broken ones",
+    )
+    args = parser.parse_args()
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+    if not os.path.isdir(HUB):
+        die(f"HF cache not found: {HUB}")
+    warnings.filterwarnings("ignore")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    sys.exit(run(apply=(args.command == "fix")))
+
+
+if __name__ == "__main__":
+    main()

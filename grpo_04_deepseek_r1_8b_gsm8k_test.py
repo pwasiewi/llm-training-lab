@@ -21,6 +21,24 @@ bnb_config = BitsAndBytesConfig(
 model = AutoModelForCausalLM.from_pretrained(model_path, quantization_config=bnb_config, device_map="auto")
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 
+def ensure_bytelevel_tokenizer(tok):
+    # transformers 5.x rebuilds LlamaTokenizerFast in sentencepiece style, ignoring the
+    # ByteLevel decoder in tokenizer.json: encode drops spaces, decode leaks Ġ/Ċ markers.
+    # The merged checkpoint inherits the broken tokenizer_class, so guard here too.
+    probe = "a b,\nc d"
+    out = tok.decode(tok(probe, add_special_tokens=False).input_ids, skip_special_tokens=True)
+    if out.strip() == probe:
+        return tok
+    from transformers import PreTrainedTokenizerFast
+    print(f"WARNING: broken byte-level tokenizer from {tok.name_or_path}; "
+          "reloading via PreTrainedTokenizerFast — run 'grpo-fix-hf-tokenizer fix' to repair the HF cache")
+    fixed = PreTrainedTokenizerFast.from_pretrained(tok.name_or_path)
+    if fixed.pad_token is None:
+        fixed.pad_token = tok.pad_token or fixed.eos_token
+    return fixed
+
+tokenizer = ensure_bytelevel_tokenizer(tokenizer)
+
 dataset = load_dataset("gsm8k", "main")
 test_dataset = list(dataset["test"].shuffle(seed=seed))
 
