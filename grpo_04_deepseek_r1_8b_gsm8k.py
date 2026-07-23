@@ -241,12 +241,12 @@ _vocab_size = model.config.vocab_size
 # adapter synced for the *previous* round at that point, which is fine: the log
 # ordering vs NAN-WATCH shows which link breaks first. Attribute paths match
 # unsloth_zoo.vllm_utils (vLLM V1 and V0 layouts).
-def _find_vllm_model():
+def _find_vllm_runner():
     eng = getattr(model, "vllm_engine", None)
     if eng is None:
         return None
-    for path in ("engine_core.engine_core.model_executor.driver_worker.model_runner.model",
-                 "model_executor.driver_worker.model_runner.model"):
+    for path in ("engine_core.engine_core.model_executor.driver_worker.model_runner",
+                 "model_executor.driver_worker.model_runner"):
         obj = eng.llm_engine
         try:
             for attr in path.split("."):
@@ -256,7 +256,8 @@ def _find_vllm_model():
             continue
     return None
 
-_vllm_model = _find_vllm_model()
+_vllm_runner = _find_vllm_runner()
+_vllm_model = getattr(_vllm_runner, "model", None)
 
 def _scan_weights(mod, tag):
     bad = [n for n, p in mod.named_parameters()
@@ -272,6 +273,156 @@ print("WEIGHT-WATCH armed: train-side LoRA"
       + (" + vLLM weight copy" if _vllm_model is not None
          else " (vLLM internals NOT reachable — vLLM copy unchecked)"),
       flush=True)
+
+# SAMPLER-WATCH: the crash is an async inductor-kernel assert (bound = vocab
+# size) that surfaces at an unrelated bitsandbytes launch, so the failing site
+# is invisible. WEIGHT-WATCH ruled out non-finite weights on both sides, which
+# leaves runtime state: non-finite logits reaching the sampler (torch.
+# multinomial on NaN probs can return garbage/out-of-range ids), or the sampler
+# emitting an id >= vocab that the next decode step's embedding gather trips
+# on. Wrap the vLLM V1 sampler to turn either case into a synchronous
+# RuntimeError with the logits dumped for post-mortem.
+# The gpu-worker Sampler (vllm/v1/worker/gpu/sample/sampler.py) is a plain
+# class invoked via __call__(logits, input_batch), not an nn.Module with
+# forward — special methods resolve on the type, so patch the class.
+_sampler = getattr(_vllm_runner, "sampler", None)
+if _sampler is not None:
+    _SamplerCls = type(_sampler)
+    _orig_sampler_call = _SamplerCls.__call__
+    def _checked_sampler_call(self, logits, *a, **kw):
+        # .item() would abort CUDA graph capture (warmup does a dummy
+        # sampler run while capturing) — pass through untouched there.
+        if torch.cuda.is_current_stream_capturing():
+            return _orig_sampler_call(self, logits, *a, **kw)
+        step = trainer.state.global_step if trainer.state is not None else "?"
+        if torch.is_tensor(logits) and not torch.isfinite(logits).all().item():
+            torch.save(logits, "/tmp/grpo04_bad_logits.pt")
+            n = (~torch.isfinite(logits)).sum().item()
+            raise RuntimeError(
+                f"SAMPLER-WATCH: {n} non-finite logits entering vLLM sampler "
+                f"at step {step}; dumped to /tmp/grpo04_bad_logits.pt")
+        out = _orig_sampler_call(self, logits, *a, **kw)
+        ids = getattr(out, "sampled_token_ids", None)
+        if torch.is_tensor(ids) and ids.numel():
+            mn, mx = ids.min().item(), ids.max().item()
+            if mn < 0 or mx >= _vocab_size:
+                torch.save({"logits": logits, "ids": ids}, "/tmp/grpo04_bad_logits.pt")
+                raise RuntimeError(
+                    f"SAMPLER-WATCH: sampler emitted out-of-vocab id "
+                    f"min={mn} max={mx} shape={tuple(ids.shape)} "
+                    f"(vocab={_vocab_size}) at step {step}; "
+                    f"dumped to /tmp/grpo04_bad_logits.pt")
+        return out
+    _SamplerCls.__call__ = _checked_sampler_call
+print(f"SAMPLER-WATCH {'armed: vLLM sampler wrapped' if _sampler is not None else 'NOT armed: sampler not reachable'}",
+      flush=True)
+
+# LOGP-WATCH: with weights and the vLLM sampler exculpated, the only gathers
+# over the vocab dim (the assert bound == vocab_size) are in unsloth's compiled
+# logp functions (unsloth_compiled_cache/UnslothGRPOTrainer.py). They run
+# INSIDE _prepare_inputs (old/ref logps) and in the loss — before the
+# _prepare_inputs validator sees anything, which is why it stayed silent.
+# Wrap both module-level functions: validate the gather index (completion ids)
+# eagerly — the .item() sync here also surfaces any assert pending from
+# EARLIER kernels, so a traceback in the pre-check means the crash was born
+# upstream — and synchronize after the call so an assert from THIS gather
+# becomes a synchronous error naming the true site. Call sites read these
+# names from module globals at call time, so patching the attributes covers
+# every path (including where the function is passed as an argument).
+import sys as _sys
+_ugrpo_mod = next((m for n, m in _sys.modules.items()
+                   if n.endswith("UnslothGRPOTrainer")
+                   and hasattr(m, "chunked_selective_log_softmax")), None)
+
+def _wrap_logp_fn(fn, fname, index_pos):
+    def wrapped(*args, **kwargs):
+        idx = kwargs.get("index", args[index_pos] if len(args) > index_pos else None)
+        step = trainer.state.global_step if trainer.state is not None else "?"
+        if torch.is_tensor(idx):
+            mn, mx = idx.min().item(), idx.max().item()
+            if mn < 0 or mx >= _vocab_size:
+                torch.save(idx, "/tmp/grpo04_bad_index.pt")
+                raise RuntimeError(
+                    f"LOGP-WATCH: OOB gather index into {fname}: min={mn} max={mx} "
+                    f"shape={tuple(idx.shape)} (vocab={_vocab_size}) at step {step}; "
+                    f"dumped to /tmp/grpo04_bad_index.pt")
+        out = fn(*args, **kwargs)
+        torch.cuda.synchronize()
+        return out
+    return wrapped
+
+if _ugrpo_mod is not None:
+    _ugrpo_mod.chunked_selective_log_softmax = _wrap_logp_fn(
+        _ugrpo_mod.chunked_selective_log_softmax,
+        "chunked_selective_log_softmax", 1)
+    _ugrpo_mod.chunked_hidden_states_selective_log_softmax = _wrap_logp_fn(
+        _ugrpo_mod.chunked_hidden_states_selective_log_softmax,
+        "chunked_hidden_states_selective_log_softmax", 2)
+print(f"LOGP-WATCH {'armed: compiled logp gathers wrapped' if _ugrpo_mod is not None else 'NOT armed: UnslothGRPOTrainer module not found'}",
+      flush=True)
+
+# EMBED-WATCH: all three earlier probes stayed silent yet the process still
+# died with the bare assert and no traceback — because bitsandbytes'
+# CUDA_CHECK calls exit(1) the moment it sees the sticky assert, before any
+# python-side sync can raise. The only vocab-bound gather interleaved with
+# bnb kernels is the input embedding of the 4-bit training forward: if the
+# ids assembled by TRL (prompt + completion + padding) contain an
+# out-of-range value, embed_tokens asserts and layer-0's bnb dequant kills
+# the process microseconds later. Validate ids eagerly at the embedding
+# boundary — the one place no previous probe could see. (The vLLM-side
+# embedding runs inside replayed CUDA graphs where hooks don't execute, so
+# it cannot be armed this way; train-side is the prime suspect anyway given
+# the crash lands right after the reward print, i.e. at the logp forward.)
+_embed = model.get_input_embeddings()
+def _embed_pre_hook(mod, args):
+    ids = args[0] if args else None
+    if torch.is_tensor(ids) and not ids.is_floating_point() and ids.numel():
+        mn, mx = ids.min().item(), ids.max().item()
+        if mn < 0 or mx >= _vocab_size:
+            step = trainer.state.global_step if trainer.state is not None else "?"
+            torch.save(ids, "/tmp/grpo04_bad_embed_ids.pt")
+            raise RuntimeError(
+                f"EMBED-WATCH: OOB input_ids entering embedding: min={mn} "
+                f"max={mx} shape={tuple(ids.shape)} (vocab={_vocab_size}) "
+                f"at step {step}; dumped to /tmp/grpo04_bad_embed_ids.pt")
+    return None
+_embed.register_forward_pre_hook(_embed_pre_hook)
+print("EMBED-WATCH armed: train-side input embedding hooked", flush=True)
+
+# VLLM-IDS-WATCH: with the whole training side exculpated (weights, sampler
+# I/O, logp gather index, embedding ids all clean), the assert by elimination
+# fires inside vLLM's compiled forward — also bnb-quantized, so its CUDA_CHECK
+# is what exit(1)s the process. Hooks don't run inside replayed CUDA graphs;
+# the last python-visible point is prepare_inputs() in execute_model, which
+# fills the persistent input_ids buffer (host copies + a Triton kernel that
+# stores each round's last sampled token directly into the buffer — prime
+# suspect for an off-by-one at a specific batch shape). Validate the FULL
+# buffer right after prepare_inputs, before the forward launches: the graph
+# runs on shape-padded token counts, so the stale padding region is read too
+# and is covered by checking the whole buffer.
+if _vllm_runner is not None and hasattr(_vllm_runner, "prepare_inputs"):
+    _vllm_ids_buf = getattr(getattr(_vllm_runner, "input_buffers", None), "input_ids", None)
+    _orig_vllm_prepare_inputs = _vllm_runner.prepare_inputs
+    def _checked_vllm_prepare_inputs(*args, **kwargs):
+        ib = _orig_vllm_prepare_inputs(*args, **kwargs)
+        ids = _vllm_ids_buf if _vllm_ids_buf is not None else getattr(ib, "input_ids", None)
+        if (torch.is_tensor(ids) and ids.numel()
+                and not torch.cuda.is_current_stream_capturing()):
+            mn, mx = ids.min().item(), ids.max().item()
+            if mn < 0 or mx >= _vocab_size:
+                step = trainer.state.global_step if trainer.state is not None else "?"
+                torch.save(ids, "/tmp/grpo04_bad_vllm_ids.pt")
+                raise RuntimeError(
+                    f"VLLM-IDS-WATCH: OOB id in vLLM input buffer before "
+                    f"forward: min={mn} max={mx} (vocab={_vocab_size}) at "
+                    f"step {step}; dumped to /tmp/grpo04_bad_vllm_ids.pt")
+        return ib
+    _vllm_runner.prepare_inputs = _checked_vllm_prepare_inputs
+    print(f"VLLM-IDS-WATCH armed: prepare_inputs wrapped "
+          f"({'full buffer' if _vllm_ids_buf is not None else 'batch view only'})",
+          flush=True)
+else:
+    print("VLLM-IDS-WATCH NOT armed: runner/prepare_inputs not reachable", flush=True)
 
 _orig_prepare_inputs = trainer._prepare_inputs
 def _checked_prepare_inputs(*args, **kwargs):

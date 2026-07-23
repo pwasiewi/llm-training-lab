@@ -122,6 +122,64 @@ Qwen3-14B ≈ Phi-4  >  DeepSeek-R1-Distill-8B  >  Qwen3-8B  >  Llama-3.1-8B  > 
 ★★★★                       ★★★★                    ★★★           ★★★               ★★                ★
 ```
 
+#### Training Health Audit (2026-07-23) — KL/grad_norm pathology across all GRPO runs
+
+Triggered by the recurring CUDA device-side assert in `grpo_04` (DeepSeek-R1-8B). The Triton
+A/B test (3.6.0 → 3.7.1, `dev-python/triton-bin` in the pwr overlay) changed the symptom, not
+the cause: under 3.6.0 the crash was deterministic at step 84; under 3.7.1 the run survived to
+step 675 and the assert became readable: `index out of bounds: 0 <= tmp0 < 128256` — 128256 is
+exactly the Llama-3/DeepSeek vocab size, so a compiled kernel gathers/scatters with a token id
+outside the vocabulary. The `fast_lora.py → fast_dequantize` frame in the traceback is async
+reporting noise; the real culprit launched earlier (most likely the compiled
+`chunked_selective_log_softmax` logp gather).
+
+The crash turned out to be a secondary symptom. Sweeping every `grpo*.log`:
+
+| Script | Model | First KL values (step 1→) | Verdict |
+|---|---|---|---|
+| grpo_01 | gemma-3-1b | 0 / 0.001 / 0 | healthy |
+| grpo_06 | Llama-3.1-8B (DAPO) | 0 / 0 / 0 | healthy (caveat: beta=0 may make KL trivially 0) |
+| grpo_07 | Phi-4-mini | 0.0008 / 0.0008 / 0.001 | healthy |
+| grpo_02 | Qwen2.5-1.5B | 5807 → **1.4e6** | sick (fresh run — no adapter load in log) |
+| grpo_04 | DeepSeek-R1-8B | 45 → 4261 | sick |
+| grpo_05 | Qwen3-4B | 2.5e5 | sick |
+| grpo_08 | Qwen3-4B | 1.6e4 | sick |
+| grpo_03 | Llama-3.1-8B | 72 → 1392 | inconclusive — resumes from checkpoint-2400, KL>0 partly legitimate |
+
+Key facts:
+
+1. **With a fresh (zero) LoRA, KL at step 1 must be ~0.** Values in the tens to millions mean
+   the trainer-side per-token logps are garbage from the very first step — the sick runs never
+   trained. The 675-step grpo_04 run confirms it: correctness reward flat at 1.47–1.56 in every
+   50-step window (zero learning, pure GPU burn).
+2. **`grad_norm` is broken in every script, healthy or sick.** 100% `nan` in all logs except
+   grpo_01, whose "best" log has 27× nan, 12× inf and two absurd finite values (8.8e8, 3.6e5).
+   This is a separate, stack-wide bug (unsloth/TRL/bnb grad-norm path), independent of the KL
+   split.
+3. **Model split:** all Qwen models (Qwen2.5-1.5B, Qwen3-4B) + DeepSeek-R1-distill are sick;
+   Gemma-3-1b, fresh Llama-3.1-8B and Phi-4-mini are healthy. The earlier "`<think>`
+   chat-template" hypothesis is weakened: Qwen2.5-1.5B uses plain ChatML (no think block) and
+   is the sickest of all. The discriminating factor (chat template handling, pad/eos config in
+   the unsloth repos, or a per-architecture unsloth code path) is not yet identified.
+4. Eliminated suspects: Triton version (symptom shifter only), byte-level tokenizer corruption
+   (`grpo-fix-hf-tokenizer scan` reports all cached tokenizers OK, and the in-script guard in
+   grpo_04 stayed silent), NaN weights / sampler ids / vLLM input ids (all five WATCH probes
+   from the earlier investigation were clean).
+
+Next steps:
+
+- Do **not** rerun sick scripts as-is — hours of GPU with zero learning, and the assert will
+  return.
+- Decisive probe (cheap, no training): dump `prompt_ids`/`completion_ids` right before the logp
+  gather for one batch and compare against what vLLM generated (lengths, `max(id)`, `min(id)`,
+  whether the trainer prompt includes the template-appended `<think>`). Run it pairwise: one
+  sick model (Qwen2.5-1.5B — smallest, most extreme) vs one healthy (gemma-1b or Phi-4-mini),
+  and diff structurally.
+- Resolve `grad_norm=nan` separately on a healthy script (grpo_07): logging artifact vs real
+  non-finite gradients.
+- Permanent guard for all scripts: assert KL < 1.0 at step 1 with a fresh LoRA, so a broken run
+  dies after a minute instead of a day.
+
 ---
 
 ### 6. Other
