@@ -56,7 +56,7 @@ model = FastLanguageModel.get_peft_model(
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                     "gate_proj", "up_proj", "down_proj"],
     lora_alpha=lora_rank,
-    use_gradient_checkpointing="unsloth",
+    use_gradient_checkpointing=True,  # HF per-layer GC; "unsloth" offload GC produces NaN grads -> no-op training (probes 2026-07-24, see README)
     random_state=3407,
 )
 

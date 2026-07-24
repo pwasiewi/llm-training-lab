@@ -13,6 +13,15 @@ logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
 
 import torch
 torch.backends.cuda.enable_flash_sdp(True)
+# GRPO_ANOMALY=1: autograd anomaly mode — pinpoints the backward op that creates the
+# NaN gradients found by GRAD-WATCH (2026-07-24: non-finite grads in most micro-batches,
+# optimizer sees 128/128 NaN, lora_B stays zero -> every run so far was a no-op).
+# ~3x slower; combine with GRPO_MAX_STEPS=1. If the report only names a compiled-function
+# node, rerun with TORCHDYNAMO_DISABLE=1 as well — and if the NaN disappears in eager
+# mode, the bug lives in the compiled Triton kernels (triton/torch pin mismatch trail).
+if os.environ.get("GRPO_ANOMALY") == "1":
+    torch.autograd.set_detect_anomaly(True)
+    print("GRPO_ANOMALY=1: autograd anomaly detection ON", flush=True)
 from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
@@ -38,13 +47,22 @@ max_seq_length = 2048
 max_prompt_length = 512
 lora_rank = 16   # smaller rank: 14B already has high capacity, saves activations memory
 
+# GRPO_NO_VLLM=1: control probe (2026-07-24) — rollouts via HF generate instead of the
+# colocated vLLM engine. Discriminates bug (c): with real LoRA updates flowing, vLLM
+# generations corrupt progressively (coherent -> gibberish -> single-token loops within
+# ~5 steps) while the adapter itself stays tiny/finite. If everything stays healthy
+# without vLLM, the corruption lives in the colocation (shared VRAM pool / LoRA hot-load).
+_no_vllm = os.environ.get("GRPO_NO_VLLM") == "1"
+
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
     load_in_4bit=True,
-    attn_implementation="flash_attention_2",
+    # no-vLLM path runs HF attention directly; flash_attn package is absent on this
+    # host (flex/sdpa stack), so fall back to sdpa there.
+    attn_implementation=("sdpa" if _no_vllm else "flash_attention_2"),
     device_map="auto",
-    fast_inference=True,
+    fast_inference=not _no_vllm,
     gpu_memory_utilization=0.5,  # 16 GB shared with desktop; higher leaves too little for the training step
     max_lora_rank=lora_rank,
 )
@@ -52,10 +70,24 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 model = FastLanguageModel.get_peft_model(
     model,
     r=lora_rank,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=lora_rank * 2,   # alpha = 2*rank for larger model stability
-    use_gradient_checkpointing="unsloth",
+    # Phi-4-mini fuses attention into qkv_proj and the MLP into gate_up_proj; the
+    # unfused Llama-style names match nothing, so the old list put LoRA only on
+    # o_proj + down_proj. Fused-module LoRA in vLLM needs the pwr patches
+    # (fused-packed-module wrap + no-stacked-name-mapping) — verify they are live.
+    target_modules=["qkv_proj", "o_proj", "gate_up_proj", "down_proj"],
+    # alpha MUST equal rank (s=1): unsloth_zoo load_lora_directly applies s=alpha/r
+    # IN-PLACE on an aliased vLLM buffer 8x per step, so any s>1 compounds —
+    # s=2 grew |B|max x256/step and rotted rollouts into gibberish (bug (c),
+    # integrity probe 2026-07-24). Until the temp-buffer patch lands, s must be 1.
+    lora_alpha=lora_rank,
+    # GRPO_GC selects the gradient-checkpointing implementation (A/B probes 2026-07-24):
+    #   hf (default) — plain torch/HF per-layer checkpointing; clean grads confirmed
+    #     (grad_norm=0.063, GRAD-WATCH non-finite=0, compiled mode);
+    #   unsloth — unsloth-zoo offloading GC; PROVEN to produce NaN gradients in most
+    #     micro-batches -> optimizer gets NaN -> zero updates (no-op training);
+    #   off — disabled entirely (clean grads confirmed; VRAM-heavy, probes only).
+    use_gradient_checkpointing={"unsloth": "unsloth", "hf": True, "off": False}[
+        os.environ.get("GRPO_GC", "hf")],
     random_state=3407,
 )
 
@@ -160,8 +192,8 @@ def starts_with_reasoning_tag(completions, **kwargs):
     return [1.0 if c[0]["content"].strip().startswith("<reasoning>") else 0.0 for c in completions]
 
 training_args = GRPOConfig(
-    use_vllm=True,
-    learning_rate=2e-6,   # conservative for 14B
+    use_vllm=not _no_vllm,
+    learning_rate=4e-6,   # 2e-6 doubled to offset LoRA scale s: 2 -> 1 (alpha=rank workaround)
     adam_beta1=0.9,
     adam_beta2=0.99,
     weight_decay=0.1,
@@ -186,6 +218,8 @@ training_args = GRPOConfig(
     max_completion_length=max_seq_length - max_prompt_length,
     vllm_max_model_length=max_seq_length,
     num_train_epochs=1,
+    # GRPO_MAX_STEPS=N caps the run for diagnostics (anomaly probe); -1 = full epoch.
+    max_steps=int(os.environ.get("GRPO_MAX_STEPS", "-1")),
     save_strategy="steps",
     save_steps=50,
     max_grad_norm=0.1,
@@ -207,6 +241,95 @@ trainer = GRPOTrainer(
     args=training_args,
     train_dataset=dataset,
 )
+
+# --- GRAD-WATCH (2026-07-24): grpo_06 checkpoint-50 proved the optimizer receives
+# exactly-zero gradients every step (lora_B all zero, Adam moments absmax=0) while
+# grad_norm logs nan. This probe pins down WHERE the gradient dies:
+#   * per-tensor backward hooks fire during loss.backward() itself — if their call
+#     count stays 0, the autograd graph never reaches the LoRA params (detached graph);
+#     if they fire with zeros, backward computes zero contributions;
+#     if they fire with non-finite values, real NaN grads get zeroed later;
+#   * a global optimizer step pre-hook reports what the optimizer actually sees.
+# Trainer-agnostic on purpose: works regardless of unsloth's exec'd inner loop.
+_watch_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+_bwd_stats = {"calls": 0, "nonzero": 0, "nonfinite": 0}
+
+# Integrity probes (bug (c), 2026-07-24): frozen base weights must NEVER change during
+# training; the LoRA magnitudes must stay tiny (~lr x steps). If a base checksum drifts
+# -> something writes into frozen weight memory (OOB write). If |B|max explodes ->
+# the optimizer path is at fault after all.
+_frozen_pool = [(n, p) for n, p in model.named_parameters()
+                if not p.requires_grad and p.numel() > 1_000_000]
+_frozen_probes = [_frozen_pool[i] for i in
+                  sorted({0, len(_frozen_pool) // 2, len(_frozen_pool) - 1})] if _frozen_pool else []
+
+def _checksum(p):
+    d = p.data
+    if d.dtype in (torch.uint8, torch.int8):
+        return int(d.view(torch.uint8).long().sum().item())
+    return float(d.float().abs().sum().item())
+
+_frozen_base = {n: _checksum(p) for n, p in _frozen_probes}
+
+def _adapter_mags():
+    a = max((p.data.abs().max().item() for n, p in _watch_params if "lora_A" in n), default=0.0)
+    b = max((p.data.abs().max().item() for n, p in _watch_params if "lora_B" in n), default=0.0)
+    return a, b
+
+def _mk_bwd_hook():
+    def _hook(grad):
+        _bwd_stats["calls"] += 1
+        if not torch.isfinite(grad).all():
+            _bwd_stats["nonfinite"] += 1
+        elif grad.abs().max().item() > 0:
+            _bwd_stats["nonzero"] += 1
+        return grad
+    return _hook
+
+for _n, _p in [(n, p) for n, p in _watch_params if "lora_B" in n][:8]:
+    _p.register_hook(_mk_bwd_hook())
+
+_gw_step = {"n": 0}
+
+def _grad_watch(optimizer, *args, **kwargs):
+    _gw_step["n"] += 1
+    if _gw_step["n"] > 10 and _gw_step["n"] % 25 != 0:
+        return
+    present = absent = nonzero = nonfinite = 0
+    absmax = 0.0
+    for _, p in _watch_params:
+        if p.grad is None:
+            absent += 1
+            continue
+        present += 1
+        if not torch.isfinite(p.grad).all():
+            nonfinite += 1
+        m = p.grad.abs().max().item()
+        if m > 0:
+            nonzero += 1
+        if m == m and m != float("inf"):  # finite
+            absmax = max(absmax, m)
+    drifted = [n.split("model.layers.")[-1][:30] for n, p in _frozen_probes
+               if _checksum(p) != _frozen_base[n]]
+    a_max, b_max = _adapter_mags()
+    # Tripwire for bug (c): with alpha=rank the in-place s-scaling is a no-op and |B|
+    # stays ~lr x steps. Anything near 1.0 means the aliased-buffer scaling is back
+    # (e.g. someone raised alpha again) — abort instead of wasting a rotten run.
+    if b_max > 1.0:
+        raise RuntimeError(
+            f"[GRAD-WATCH] |B|max={b_max:.3e} exploded at optimizer step {_gw_step['n']} "
+            "— bug (c) aliased-buffer LoRA scaling regression; check lora_alpha == lora_rank "
+            "and unsloth_zoo vllm_utils.load_lora_directly.")
+    print(f"[GRAD-WATCH step {_gw_step['n']}] optimizer sees: {present} grads "
+          f"({absent} None), nonzero={nonzero}, non-finite={nonfinite}, absmax={absmax:.3e} | "
+          f"backward hooks (8x lora_B): calls={_bwd_stats['calls']}, "
+          f"nonzero={_bwd_stats['nonzero']}, non-finite={_bwd_stats['nonfinite']} | "
+          f"base-drift: {drifted if drifted else 'none'} | |A|max={a_max:.3e} |B|max={b_max:.3e}",
+          flush=True)
+
+from torch.optim.optimizer import register_optimizer_step_pre_hook
+_gw_handle = register_optimizer_step_pre_hook(_grad_watch)
+# --- end GRAD-WATCH ---
 
 def check_lengths(dataset, tokenizer, max_prompt_length, max_seq_length):
     too_long = 0

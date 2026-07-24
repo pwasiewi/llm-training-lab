@@ -12,10 +12,11 @@ logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
 # ----------------------------------------------------------------------------------
 
 import torch
-torch.backends.cuda.enable_flash_sdp(True)  # Enable FlashAttention kernels
+torch.backends.cuda.enable_flash_sdp(True)
 from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
+import glob
 import re
 import os
 from datasets import load_dataset, Dataset
@@ -23,65 +24,62 @@ from tqdm import tqdm
 
 os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
 os.environ["VLLM_USE_V1"] = "0"
-os.environ["FLASH_ATTENTION_USE_FA2"] = "1"  # Force FA2
-os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"    # Disable xFormers (conflicts with FA2)
+os.environ["FLASH_ATTENTION_USE_FA2"] = "1"
+os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 
-# Load model & tokenizer
-# https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.1_(8B)-GRPO.ipynb
-model_name = "meta-llama/meta-Llama-3.1-8B-Instruct"
-model_path = "outputs/lora-grpo-lama4"
-max_seq_length = 1024
-max_prompt_length = 384
-lora_rank = 32
+# Qwen3-4B — largest Qwen3 that fits on 16GB VRAM in 4-bit with colocated vLLM.
+# Hybrid thinking mode: uses <think>...</think> natively (/think in the prompt).
+# 14B does NOT fit on 16 GB with colocated vLLM (~9 GiB per copy x2). Use Qwen3-4B r16.
+model_name = "Qwen/Qwen3-4B"
+model_path = "outputs/lora-grpo-qwen3-4b-r16"
+max_seq_length = 2048  # 4096 OOMs vLLM LoRA-manager init on 16 GB (grpo_05 lesson)
+max_prompt_length = 512
+lora_rank = 16   # smaller rank for memory efficiency
 
-checkpoint_path = f"{model_path}-outputs/checkpoint-550"  # Path to your last checkpoint
+# Continuation: resume from the newest checkpoint saved by grpo_08_qwen3_4b_gsm8k.py
+# (save_steps=50 in that script). Auto-detected instead of hardcoded, so the script
+# keeps working as new checkpoints appear.
+def latest_checkpoint(output_dir: str) -> str:
+    candidates = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+    numbered = [(int(m.group(1)), p) for p in candidates
+                if (m := re.fullmatch(r"checkpoint-(\d+)", os.path.basename(p)))]
+    if not numbered:
+        raise SystemExit(f"No checkpoint-* found in {output_dir} — "
+                         "run grpo_08_qwen3_4b_gsm8k.py first (saves every 50 steps).")
+    return max(numbered)[1]
 
-# Load the model and tokenizer from the checkpoint
+checkpoint_path = latest_checkpoint(f"{model_path}-outputs")
+print(f"Resuming from: {checkpoint_path}", flush=True)
+
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
     load_in_4bit=True,
-    attn_implementation="flash_attention_2",  # Explicitly enable
+    attn_implementation="flash_attention_2",
     device_map="auto",
     fast_inference=True,
-    gpu_memory_utilization=0.5,  # 16 GB shared with desktop; 0.8 leaves too little for the training step
+    gpu_memory_utilization=0.5,  # 16 GB shared with desktop; higher leaves too little for the training step
     max_lora_rank=lora_rank,
-    # adapter_name=checkpoint_path  # This loads the LoRA weights from the checkpoint
+    adapter_name=checkpoint_path,  # load the LoRA weights from the checkpoint
 )
 
-# Apply LoRA
 model = FastLanguageModel.get_peft_model(
     model,
     r=lora_rank,
+    # Qwen3 keeps attention/MLP projections UNFUSED at the HF level (unlike Phi-4-mini/
+    # grpo_07 which fuses into qkv_proj/gate_up_proj). Do NOT switch to fused names.
+    # NOTE: checkpoints written before 2026-07-24 used alpha=2*rank and never actually
+    # trained (bug (c) explosion / GC no-op) — they are NOT resumable with this config.
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                     "gate_proj", "up_proj", "down_proj"],
+    # alpha MUST equal rank (s=1) — bug (c) workaround: unsloth_zoo load_lora_directly
+    # applies s=alpha/r in-place on an aliased vLLM buffer 8x per step (s=2 -> |B| x256/step).
     lora_alpha=lora_rank,
     use_gradient_checkpointing=True,  # HF per-layer GC; "unsloth" offload GC produces NaN grads -> no-op training (probes 2026-07-24, see README)
     random_state=3407,
 )
 
-# Load and prep dataset
-SYSTEM_PROMPT = """
-Respond in the following format:
-<reasoning>
-...
-</reasoning>
-<answer>
-...
-</answer>
-"""
-
-XML_COT_FORMAT = """\
-<reasoning>
-{reasoning}
-</reasoning>
-<answer>
-{answer}
-</answer>
-"""
-
-# Function to extract final answer
-def extract_hash_answer(text: str) -> str:
+def extract_answer(text: str) -> str:
     # Try the <answer> tag first; DOTALL because the trained format puts newlines inside the tags
     tag_match = re.search(r'<answer>(.*?)</answer>', text, re.DOTALL)
     if tag_match:
@@ -94,7 +92,7 @@ def extract_hash_answer(text: str) -> str:
             return str(-value if whole.startswith('-') else value)
         # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
         # then drop comma thousands separators
-        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
+        norm = re.sub(r'[$€£\s]', '', content).replace(',', '')
         if re.fullmatch(r'-?\d+(\.\d+)?', norm):
             return norm
     if "####" in text:
@@ -108,28 +106,24 @@ def get_gsm8k_questions(split="train") -> Dataset:
     return data.map(lambda x: {
         'prompt': [
             {'role': 'system', 'content': (
-                "You are a helpful assistant that always responds using <reasoning> and <answer> tags."
+                "You are a helpful math assistant. "
+                "Think through the problem carefully, then give the final numerical answer in <answer>...</answer> tags."
             )},
             {'role': 'user', 'content': (
-                "Please solve the following problem and respond in this format:\n"
-                "<reasoning>...</reasoning>\n"
-                "<answer>...</answer>\n\n"
-                "Start your response with the <reasoning> tag and include all calculation steps inside it.\n"
-                "Problem:\n"
-                f"{x['question']}"
+                f"/think\n\nSolve this problem step by step. "
+                f"End your response with <answer>NUMBER</answer>.\n\nProblem:\n{x['question']}"
             )}
         ],
-        'answer': extract_hash_answer(x['answer'])
+        'answer': extract_answer(x['answer'])
     })
 
 dataset = get_gsm8k_questions()
 
-# Reward functions
 def safe_float(x):
     try:
         return float(x.replace(",", "").strip())
     except:
-        return None  # or float('nan') if you prefer
+        return None
 
 _gen_batch = 0  # one reward call = one generation round (num_generations completions of one prompt)
 
@@ -144,9 +138,9 @@ def _progress():
 
 def correctness_reward_func(prompts, completions, answer, **kwargs):
     responses = [c[0]['content'] for c in completions]
-    extracted_responses = [extract_hash_answer(r) for r in responses]
-    print('-'*20, f"[{_progress()}]", f"Question:\n{prompts[0]}", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted_responses[0]}", f"\nAnswer:\n{answer[0]}", flush=True)
-    return [2.0 if safe_float(r) == safe_float(a) else 0.0 for r, a in zip(extracted_responses, answer)]
+    extracted = [extract_answer(r) for r in responses]
+    print('-'*20, f"[{_progress()}]", f"\nResponse:\n{responses[0]}", f"\nExtracted:\n{extracted[0]}", f"\nAnswer:\n{answer[0]}", flush=True)
+    return [2.0 if safe_float(r) == safe_float(a) else 0.0 for r, a in zip(extracted, answer)]
 
 def is_integer_like(s):
     try:
@@ -156,48 +150,31 @@ def is_integer_like(s):
         return False
 
 def int_reward_func(completions, **kwargs) -> list[float]:
-    responses = [completion[0]['content'] for completion in completions]
-    extracted_responses = [extract_hash_answer(r) for r in responses]
-    return [0.5 if is_integer_like(r) else 0.0 for r in extracted_responses]
+    responses = [c[0]['content'] for c in completions]
+    extracted = [extract_answer(r) for r in responses]
+    return [0.5 if is_integer_like(r) else 0.0 for r in extracted]
+
+def has_think_tags(completions, **kwargs) -> list[float]:
+    responses = [c[0]["content"] for c in completions]
+    return [0.5 if ("<think>" in r and "</think>" in r) else 0.0 for r in responses]
+
+def starts_with_think_tag(completions, **kwargs) -> list[float]:
+    return [1.0 if c[0]["content"].strip().startswith("<think>") else 0.0 for c in completions]
+
+def has_answer_tag(completions, **kwargs) -> list[float]:
+    pattern = r"<answer>.*?</answer>"
+    responses = [c[0]["content"] for c in completions]
+    return [0.5 if re.search(pattern, r, flags=re.DOTALL) else 0.0 for r in responses]
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion has a specific format."""
-    pattern = r"^<reasoning>\s*.*?\s*</reasoning>\s*<answer>\s*.*?\s*</answer>\s*$"
-    responses = [completion[0]["content"] for completion in completions]
+    pattern = r"^<think>\s*.*?\s*</think>.*?<answer>\s*.*?\s*</answer>\s*$"
+    responses = [c[0]["content"] for c in completions]
     matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses]
-    return [0.5 if match else 0.0 for match in matches]
+    return [0.5 if m else 0.0 for m in matches]
 
-def soft_format_reward_func(completions, **kwargs) -> list[float]:
-    """Reward function that checks if the completion has a specific format."""
-    pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
-    responses = [completion[0]["content"] for completion in completions]
-    matches = [re.search(pattern, r, flags=re.DOTALL) for r in responses]
-    return [0.5 if match else 0.0 for match in matches]
-
-def count_xml(text: str) -> float:
-    count = 0.0
-    if "<reasoning>" in text:
-        count += 0.125
-    if "</reasoning>" in text:
-        count += 0.125
-    if "<answer>" in text:
-        count += 0.125
-    if "</answer>" in text:
-        count += 0.125
-    return count
-
-def xmlcount_reward_func(completions, **kwargs) -> list[float]:
-    contents = [completion[0]["content"] for completion in completions]
-    #print(contents)
-    return [count_xml(c) for c in contents]
-
-def starts_with_reasoning_tag(completions, **kwargs):
-    return [1.0 if c[0]["content"].strip().startswith("<reasoning>") else 0.0 for c in completions]
-
-# Training arguments
 training_args = GRPOConfig(
     use_vllm=True,
-    learning_rate=5e-6,
+    learning_rate=4e-6,   # 2e-6 doubled to offset LoRA scale s: 2 -> 1 (alpha=rank workaround, bug (c))
     adam_beta1=0.9,
     adam_beta2=0.99,
     weight_decay=0.1,
@@ -207,38 +184,35 @@ training_args = GRPOConfig(
     logging_steps=1,
     bf16=is_bfloat16_supported(),
     fp16=not is_bfloat16_supported(),
-    per_device_train_batch_size=3,  # 16 GB: batch 9 OOMs in matmul_lora at seq 1024 (2026-07-19)
-    gradient_accumulation_steps=12,  # keep effective batch = 36
-    num_generations=3,
-    # TRL scores the whole generation batch (batch x steps_per_generation, ~36 seqs)
-    # in one logp forward -> constant 238 MiB alloc OOM regardless of train batch.
-    # Cap it at num_generations: same total work, 12x smaller forward peak.
-    generation_batch_size=3,
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=8,
+    num_generations=2,
+    # 16 GB: TRL scores the whole generation batch (batch x steps_per_generation)
+    # in one logp forward -> OOM in matmul_lora (grpo_03 lesson, 2026-07-20).
+    # Cap at num_generations and chunk the logp forward per sequence.
+    generation_batch_size=2,
+    unsloth_grpo_mini_batch=1,
+    unsloth_logit_chunk_multiplier=16,
     # TRL 1.8 removed max_prompt_length from GRPOConfig; prompts are no longer
     # truncated by the config. vllm_max_model_length sets the vLLM context window
     # (>= max prompt length in the dataset + max_completion_length).
     max_completion_length=max_seq_length - max_prompt_length,
     vllm_max_model_length=max_seq_length,
     num_train_epochs=1,
-    #max_steps=1000,
     save_strategy="steps",
     save_steps=50,
     max_grad_norm=0.1,
     report_to="none",
     output_dir=f"{model_path}-outputs",
-    # 16 GB: vLLM floor is ~7.1 GiB (weights-bound), training forward on the full
-    # batch OOMs in matmul_lora. Chunk the logp forward to 1 sequence at a time.
-    unsloth_grpo_mini_batch=1,
-    unsloth_logit_chunk_multiplier=16,
 )
 
 trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=[
-        starts_with_reasoning_tag,
-        xmlcount_reward_func,
-        soft_format_reward_func,
+        starts_with_think_tag,
+        has_think_tags,
+        has_answer_tag,
         strict_format_reward_func,
         int_reward_func,
         correctness_reward_func,
@@ -248,25 +222,15 @@ trainer = GRPOTrainer(
 )
 
 def check_lengths(dataset, tokenizer, max_prompt_length, max_seq_length):
-    too_long_prompt = 0
-    too_long_total = 0
-
+    too_long = 0
     for sample in tqdm(dataset):
         prompt = tokenizer.apply_chat_template(sample["prompt"], tokenize=False)
-        prompt_ids = tokenizer(prompt)["input_ids"]
-
-        if len(prompt_ids) > max_prompt_length:
-            too_long_prompt += 1
-
-        # Assume completion is expected to be no more than the difference
-        if len(prompt_ids) > max_seq_length:
-            too_long_total += 1
-
-    print(f"Samples exceeding max_prompt_length ({max_prompt_length}): {too_long_prompt}")
-    print(f"Samples exceeding max_seq_length ({max_seq_length}): {too_long_total}")
+        ids = tokenizer(prompt)["input_ids"]
+        if len(ids) > max_prompt_length:
+            too_long += 1
+    print(f"Samples exceeding max_prompt_length ({max_prompt_length}): {too_long}")
 
 check_lengths(dataset, tokenizer, max_prompt_length, max_seq_length)
-
 
 # vLLM engine init (attention backend selector) permanently lowers
 # torch._dynamo.config.recompile_limit to 16, clobbering unsloth's 1024.
@@ -279,7 +243,10 @@ import torch._dynamo
 torch._dynamo.config.recompile_limit = 1024
 torch._dynamo.config._config["recompile_limit"].default = 1024
 
-#trainer.train(resume_from_checkpoint=checkpoint_path)
-trainer.train()
-# Save final model
-model.save_pretrained_merged(model_path, tokenizer, save_method="merged_16bit")
+trainer.train(resume_from_checkpoint=checkpoint_path)
+
+# Do NOT save_pretrained_merged here: with the vLLM engine still live it aliases the
+# rollout memory pool and corrupts o_proj/down_proj to ~1e13 (bug (d), grpo_07 proved
+# it 2026-07-24). Merge offline from the checkpoint instead:
+#     python grpo_08_merge.py
+print("Training done. Merge offline with: python grpo_08_merge.py", flush=True)

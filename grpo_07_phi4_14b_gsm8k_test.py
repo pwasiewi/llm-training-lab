@@ -1,51 +1,25 @@
+# GSM8K test-set evaluation for grpo_07 (Phi-4-mini) — batched vLLM.
+#
+# Usage:
+#   python grpo_07_phi4_14b_gsm8k_test.py [model_path_or_hf_id]
+#
+# Default model: outputs/lora-grpo-phi4-mini (merged 16-bit written at the end of
+# grpo_07_phi4_14b_gsm8k.py). Run twice to compare trained vs base:
+#   python grpo_07_phi4_14b_gsm8k_test.py outputs/lora-grpo-phi4-mini
+#   python grpo_07_phi4_14b_gsm8k_test.py microsoft/Phi-4-mini-instruct
+#
+# Greedy decoding (temperature=0) for a deterministic, standard GSM8K comparison.
+# gpu_memory_utilization=0.8 + max_model_len=2048: no colocated trainer here, but
+# the KDE/Wayland desktop holds ~1-2 GiB (see the unsloth-grpo-patching skill).
 import os
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation; must precede first CUDA alloc
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from datasets import load_dataset
-import torch
+import sys
 import re
-import os
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
-seed = 43
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-model_path = "outputs/lora-grpo-phi4"
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_use_double_quant=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,  # Phi-4 prefers bfloat16
-)
-
-model = AutoModelForCausalLM.from_pretrained(model_path, quantization_config=bnb_config, device_map="auto")
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-dataset = load_dataset("gsm8k", "main")
-test_dataset = list(dataset["test"].shuffle(seed=seed))
-
-def generate_answer(question, model, tokenizer):
-    text = tokenizer.apply_chat_template([
-        {'role': 'system', 'content': "You are a helpful assistant that always responds using <reasoning> and <answer> tags."},
-        {'role': 'user', 'content': (
-            "Please solve the following problem and respond in this format:\n"
-            "<reasoning>...</reasoning>\n"
-            "<answer>...</answer>\n\n"
-            "Start your response with the <reasoning> tag and include all calculation steps inside it.\n"
-            f"Problem:\n{question}"
-        )},
-    ], tokenize=False, add_generation_prompt=True)
-    input_ids = tokenizer(text, return_tensors="pt").input_ids.to(model.device)
-    output_ids = model.generate(
-        input_ids,
-        do_sample=True,
-        temperature=0.1,
-        top_p=0.9,
-        top_k=30,
-        max_new_tokens=2048,
-        repetition_penalty=1.1,
-    )
-    return tokenizer.decode(output_ids[0], skip_special_tokens=True)
+BASE_MODEL = "microsoft/Phi-4-mini-instruct"
 
 def extract_final_answer(text: str) -> str:
     # Try the <answer> tag first; DOTALL because the trained format puts newlines inside the tags
@@ -60,7 +34,7 @@ def extract_final_answer(text: str) -> str:
             return str(-value if whole.startswith('-') else value)
         # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
         # then drop comma thousands separators
-        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
+        norm = re.sub(r'[$€£\s]', '', content).replace(',', '')
         if re.fullmatch(r'-?\d+(\.\d+)?', norm):
             return norm
     if "####" in text:
@@ -72,22 +46,61 @@ def extract_final_answer(text: str) -> str:
 def safe_float(x):
     try:
         return float(x.replace(",", "").strip())
-    except:
+    except (ValueError, AttributeError):
         return None
 
-correct = 0
-total = 0
-for example in test_dataset:
-    question = example["question"]
-    ground_truth = extract_final_answer(example["answer"])
-    model_answer = generate_answer(question, model, tokenizer)
-    model_answer_final = extract_final_answer(model_answer)
-    print(f"Question: {question}")
-    print(f"Model Answer: {model_answer}")
-    print(f"Ground Truth: {ground_truth} | Extracted: {model_answer_final}")
-    if model_answer_final is not None and ground_truth is not None and safe_float(model_answer_final) == safe_float(ground_truth):
-        correct += 1
-    total += 1
-    print(f"-- {correct}/{total} = {correct/total:.2f} --")
+def build_prompt(tokenizer, question: str) -> str:
+    # Same system/user prompt as training, so both models are scored on the task
+    # the trained one was optimized for.
+    return tokenizer.apply_chat_template([
+        {'role': 'system', 'content': "You are a helpful assistant that always responds using <reasoning> and <answer> tags."},
+        {'role': 'user', 'content': (
+            "Please solve the following problem and respond in this format:\n"
+            "<reasoning>...</reasoning>\n"
+            "<answer>...</answer>\n\n"
+            "Start your response with the <reasoning> tag and include all calculation steps inside it.\n"
+            f"Problem:\n{question}"
+        )},
+    ], tokenize=False, add_generation_prompt=True)
 
-print(f"Final Accuracy: {correct/total*100:.2f}%")
+def main():
+    # vLLM V1 spawns worker processes that re-import this module — all executable
+    # code must stay under __main__ or the engine init recurses.
+    from vllm import LLM, SamplingParams
+    from transformers import AutoTokenizer
+    from datasets import load_dataset
+
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "outputs/lora-grpo-phi4-mini"
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+    except Exception:
+        # merged dir may lack tokenizer files; the chat template is the base one anyway
+        tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+
+    data = load_dataset("openai/gsm8k", "main")["test"]
+    prompts = [build_prompt(tokenizer, ex["question"]) for ex in data]
+    truths = [extract_final_answer(ex["answer"]) for ex in data]
+
+    llm = LLM(model=model_path, dtype="bfloat16",
+              gpu_memory_utilization=0.8, max_model_len=2048)
+    outs = llm.generate(prompts, SamplingParams(temperature=0.0, max_tokens=1024))
+
+    correct = fmt = 0
+    fmt_pattern = re.compile(r'<reasoning>.*?</reasoning>\s*<answer>.*?</answer>', re.DOTALL)
+    for i, (gt, out) in enumerate(zip(truths, outs)):
+        resp = out.outputs[0].text
+        pred = extract_final_answer(resp)
+        if fmt_pattern.search(resp):
+            fmt += 1
+        if pred is not None and gt is not None and safe_float(pred) == safe_float(gt):
+            correct += 1
+        if i < 3:  # spot-check the first few completions in the log
+            print(f"--- sample {i} ---\n{resp}\nGT: {gt} | Extracted: {pred}", flush=True)
+
+    n = len(truths)
+    print(f"\nModel: {model_path}")
+    print(f"Format compliance (<reasoning>+<answer>): {fmt}/{n} = {fmt/n*100:.2f}%")
+    print(f"Final Accuracy: {correct}/{n} = {correct/n*100:.2f}%")
+
+if __name__ == "__main__":
+    main()

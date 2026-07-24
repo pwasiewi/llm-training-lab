@@ -35,7 +35,11 @@ os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 #   5. Higher warmup for stability without KL anchor
 model_name = "meta-llama/meta-Llama-3.1-8B-Instruct"
 model_path = "outputs/lora-grpo-dapo-lama"
-max_seq_length = 1024
+# 1024 gave only 640 completion tokens -> Llama-3.1-8B is verbose on GSM8K and ~12-19%
+# of completions hit the cap and were truncated before emitting </answer> (headless1 run,
+# 2026-07-24). 1536 -> 1152 completion budget clears it. Kept below grpo_07's 2048 because
+# DAPO here runs num_generations=8 x batch 4 (8x the rollout volume) on the 16 GB card.
+max_seq_length = 1536
 max_prompt_length = 384
 lora_rank = 32
 
@@ -56,7 +60,7 @@ model = FastLanguageModel.get_peft_model(
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                     "gate_proj", "up_proj", "down_proj"],
     lora_alpha=lora_rank,
-    use_gradient_checkpointing="unsloth",
+    use_gradient_checkpointing=True,  # HF per-layer GC; "unsloth" offload GC produces NaN grads -> no-op training (probes 2026-07-24, see README)
     random_state=3407,
 )
 
@@ -200,6 +204,8 @@ training_args = GRPOConfig(
     max_completion_length=max_seq_length - max_prompt_length,
     vllm_max_model_length=max_seq_length,
     num_train_epochs=1,
+    # GRPO_MAX_STEPS=N caps the run for the smoke/GRAD-WATCH probe; -1 = full epoch.
+    max_steps=int(os.environ.get("GRPO_MAX_STEPS", "-1")),
     save_strategy="steps",
     save_steps=50,
     max_grad_norm=0.1,
@@ -227,6 +233,87 @@ trainer = GRPOTrainer(
     train_dataset=dataset,
 )
 
+# --- GRAD-WATCH (ported from grpo_07, 2026-07-24): the headless1 run logged grad_norm=nan
+# on every step (healthy grpo_07 logged ~0.044). nan grad_norm ALONE is a known unsloth
+# reporting artifact, so it cannot confirm a no-op — this probe settles it by tracking the
+# LoRA magnitudes directly. Read the smoke log:
+#   * |B|max growing off zero  -> optimizer IS updating; nan grad_norm was the artifact (OK);
+#   * |B|max stuck at 0.0      -> genuine no-op (NaN grads zeroed before the optimizer);
+#   * backward hooks with non-finite>0 -> real NaN grads reaching the LoRA params.
+# base-drift watches frozen weights (must never move); |B|max>1.0 tripwire = bug (c)
+# aliased-buffer scaling (should never fire here — alpha==rank, s=1).
+_watch_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+_bwd_stats = {"calls": 0, "nonzero": 0, "nonfinite": 0}
+
+_frozen_pool = [(n, p) for n, p in model.named_parameters()
+                if not p.requires_grad and p.numel() > 1_000_000]
+_frozen_probes = [_frozen_pool[i] for i in
+                  sorted({0, len(_frozen_pool) // 2, len(_frozen_pool) - 1})] if _frozen_pool else []
+
+def _checksum(p):
+    d = p.data
+    if d.dtype in (torch.uint8, torch.int8):
+        return int(d.view(torch.uint8).long().sum().item())
+    return float(d.float().abs().sum().item())
+
+_frozen_base = {n: _checksum(p) for n, p in _frozen_probes}
+
+def _adapter_mags():
+    a = max((p.data.abs().max().item() for n, p in _watch_params if "lora_A" in n), default=0.0)
+    b = max((p.data.abs().max().item() for n, p in _watch_params if "lora_B" in n), default=0.0)
+    return a, b
+
+def _mk_bwd_hook():
+    def _hook(grad):
+        _bwd_stats["calls"] += 1
+        if not torch.isfinite(grad).all():
+            _bwd_stats["nonfinite"] += 1
+        elif grad.abs().max().item() > 0:
+            _bwd_stats["nonzero"] += 1
+        return grad
+    return _hook
+
+for _n, _p in [(n, p) for n, p in _watch_params if "lora_B" in n][:8]:
+    _p.register_hook(_mk_bwd_hook())
+
+_gw_step = {"n": 0}
+
+def _grad_watch(optimizer, *args, **kwargs):
+    _gw_step["n"] += 1
+    if _gw_step["n"] > 10 and _gw_step["n"] % 25 != 0:
+        return
+    present = absent = nonzero = nonfinite = 0
+    absmax = 0.0
+    for _, p in _watch_params:
+        if p.grad is None:
+            absent += 1
+            continue
+        present += 1
+        if not torch.isfinite(p.grad).all():
+            nonfinite += 1
+        m = p.grad.abs().max().item()
+        if m > 0:
+            nonzero += 1
+        if m == m and m != float("inf"):  # finite
+            absmax = max(absmax, m)
+    drifted = [n.split("model.layers.")[-1][:30] for n, p in _frozen_probes
+               if _checksum(p) != _frozen_base[n]]
+    a_max, b_max = _adapter_mags()
+    if b_max > 1.0:
+        raise RuntimeError(
+            f"[GRAD-WATCH] |B|max={b_max:.3e} exploded at optimizer step {_gw_step['n']} "
+            "— bug (c) aliased-buffer LoRA scaling; check lora_alpha == lora_rank.")
+    print(f"[GRAD-WATCH step {_gw_step['n']}] optimizer sees: {present} grads "
+          f"({absent} None), nonzero={nonzero}, non-finite={nonfinite}, absmax={absmax:.3e} | "
+          f"backward hooks (8x lora_B): calls={_bwd_stats['calls']}, "
+          f"nonzero={_bwd_stats['nonzero']}, non-finite={_bwd_stats['nonfinite']} | "
+          f"base-drift: {drifted if drifted else 'none'} | |A|max={a_max:.3e} |B|max={b_max:.3e}",
+          flush=True)
+
+from torch.optim.optimizer import register_optimizer_step_pre_hook
+_gw_handle = register_optimizer_step_pre_hook(_grad_watch)
+# --- end GRAD-WATCH ---
+
 def check_lengths(dataset, tokenizer, max_prompt_length, max_seq_length):
     too_long = 0
     for sample in tqdm(dataset):
@@ -250,4 +337,7 @@ torch._dynamo.config.recompile_limit = 1024
 torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train()
+# NOTE bug (d): do NOT trust this in-training merge (aliases the live vLLM pool ->
+# corrupts weights, grpo_07 proved this 2026-07-24). After the run, re-merge offline
+# from the checkpoint:  python grpo_06_merge.py
 model.save_pretrained_merged(model_path, tokenizer, save_method="merged_16bit")

@@ -122,6 +122,29 @@ Qwen3-14B ≈ Phi-4  >  DeepSeek-R1-Distill-8B  >  Qwen3-8B  >  Llama-3.1-8B  > 
 ★★★★                       ★★★★                    ★★★           ★★★               ★★                ★
 ```
 
+> **This hierarchy predates the bug (a)/(b)/(c)/(d) investigation below and is aspirational,
+> not measured post-fix.** See "Current status" immediately below for which scripts are
+> actually confirmed to train as of 2026-07-24.
+
+#### Current status (2026-07-24 evening) — which scripts are confirmed to actually train
+
+**grpo_01 (gemma-3-1b) and grpo_07 (Phi-4-mini) are confirmed working.** Every other
+script sits in one of three buckets:
+
+| Script | Status | Why |
+|---|---|---|
+| **grpo_07** (Phi-4-mini) | ✅ confirmed working | Full epoch (935/935 steps) + GSM8K eval showing a real improvement over the base model (format 52%→85%, accuracy 86.3%→87.7%) |
+| **grpo_01** (gemma-3-1b) | ✅ confirmed working (smoke) | Re-checked 2026-07-24: the script's `use_gradient_checkpointing=True` fix had been left **commented out** (bug (b) was never actually applied here — unsloth's default is `"unsloth"` GC, the broken mode), which is why the only pre-existing log (2026-07-20) showed `grad_norm: nan/inf` every step. Fixed and re-run (`GRPO_MAX_STEPS=5`): `non-finite(B grads)=0/182` on **all 5 steps**, `\|B\|max` grows monotonically (0→2.2e-5→7.8e-5→1.1e-4, nowhere near the ×256 bug-(c) explosion), `grad_norm` finite every step, KL stays 0.0008–0.0015. Only a 5-step smoke, not a full epoch — but the signature matches grpo_07's validated pattern exactly |
+| **grpo_08** (Qwen3-4B) | ❌ confirmed blocked | Smoke 2026-07-24 (post-fix): `\|B\|max=0` on all 5 steps, `non-finite(B grads)=252/252` every step, KL up to 1.36e6 — bug (a) blocks training, not just cosmetic |
+| **grpo_06** (DAPO Llama-8B) | ❌ confirmed blocked | `non-finite=448/448` from step 1 in both compiled and eager mode — DAPO loss math itself (beta=0), independent of bug (a)/(b) |
+| grpo_02/03/04/05/09 | ❓ not re-tested post-fix | Pre-fix KL audit flagged 02/04/05 "sick" (bug (a), Qwen/DeepSeek-R1 family) and 03 inconclusive (resumes from checkpoint); none have been rerun with the GC fix or a `\|B\|max` tripwire — and given the grpo_01 lesson, **check each script's actual `get_peft_model` call, not just memory/README claims, before trusting any "fix applied" note** |
+
+Bottom line: don't trust any script's old "healthy" KL verdict as proof it trains, and
+don't trust a changelog saying a fix was "applied to all scripts" without grepping the
+actual file — grpo_01's fix silently regressed to a comment. The only trustworthy signal
+is a **fresh** smoke run with the `\|B\|max`/non-finite tripwire (see grpo_01/07/08 for
+the pattern) confirming finite grads and a moving, non-exploding adapter.
+
 #### Training Health Audit (2026-07-23) — KL/grad_norm pathology across all GRPO runs
 
 Triggered by the recurring CUDA device-side assert in `grpo_04` (DeepSeek-R1-8B). The Triton
@@ -165,6 +188,92 @@ Key facts:
    (`grpo-fix-hf-tokenizer scan` reports all cached tokenizers OK, and the in-script guard in
    grpo_04 stayed silent), NaN weights / sampler ids / vLLM input ids (all five WATCH probes
    from the earlier investigation were clean).
+
+**Update 2026-07-23 (late evening): `grad_norm=nan` is NOT a display artifact — no GRPO run
+has ever trained.** Proof from grpo_06 `checkpoint-50` (fresh run, 50 optimizer steps):
+
+- all 224 `lora_B` matrices are **exactly zero** (LoRA-B initializes to zero; any applied
+  update would move them), adapter tensors all finite;
+- the bnb `paged_adamw_8bit` state shows `step=50` for every param but `absmax1=absmax2=0.0`
+  — both Adam moments are exactly zero, so the optimizer ran 50 times and saw **exactly-zero
+  gradients** every step (real NaN grads would have poisoned moments and weights);
+- meanwhile the logged loss was huge (49.7 with beta=0) and `clip_ratio/region_mean≈0.43`,
+  so the trainer/vLLM logp mismatch is present in grpo_06 too — its `kl=0` is trivial
+  (beta=0), not evidence of health. Genuinely healthy logp measurements remain gemma
+  (grpo_01) and Phi-4-mini (grpo_07) only.
+
+So there are (at least) two distinct bugs: (a) trainer-side logp mismatch (the KL split
+above), and (b) a backward/step-path bug shared by ALL scripts — displayed loss is finite,
+`grad_norm` logs nan, yet the gradients reaching the optimizer are zero → every GRPO run to
+date was a no-op (also explains the flat 675-step reward curve and why weights never went
+NaN). Prime suspect for (b): the shared `unsloth_compiled_cache/UnslothGRPOTrainer.py`
+chunked-logp path (`unsloth_grpo_mini_batch` / `unsloth_logit_chunk_multiplier`, part of the
+local patch set) — a misplaced `detach()`/`no_grad` would produce exactly this signature.
+
+**RESOLVED 2026-07-24 — bug (b) root cause: unsloth-zoo offloading gradient checkpointing.**
+Probe chain on grpo_07 (Phi-4-mini, GRAD-WATCH instrumentation = per-tensor backward hooks +
+global optimizer step pre-hook, both trainer-agnostic):
+
+| Probe | Config | Result |
+|---|---|---|
+| GRAD-WATCH on normal run | compiled + GC `"unsloth"` | backward reaches LoRA params, but ~85% of micro-batches produce **non-finite** grads → accumulated grad NaN → optimizer sees 128/128 NaN every step |
+| #2 anomaly | `TORCHDYNAMO_DISABLE=1` + GC `"unsloth"` | `AddmmBackward0 returned nan` — NaN persists in eager → compiled Triton kernels exonerated; forward trace hidden inside the unsloth-zoo checkpointed segment |
+| #3 anomaly | eager + GC off (`GRPO_NO_GC`) | **clean**: grad_norm=0.071, non-finite=0 |
+| #4 | compiled + GC `True` (HF per-layer) | **clean**: grad_norm=0.063, non-finite=0 — first real grad_norm ever logged |
+
+Mechanism: `use_gradient_checkpointing="unsloth"` (unsloth-zoo's CPU-offload checkpointing,
+`unsloth_zoo/gradient_checkpointing.py`) corrupts recomputed activations during backward →
+NaN gradients in most micro-batches; one poisoned micro-batch NaNs the whole gradient
+accumulation; bnb `paged_adamw_8bit` then effectively skips the update (moments stay zero) →
+`lora_B` never leaves zero. The grpo_04 device-side assert (OOB gather in backward,
+`fast_dequantize` frame) is most likely the same corruption crossing into an
+assert-compiled kernel.
+
+**Fix applied 2026-07-24:** all `grpo_0*.py` (01–09 + `_cont`) switched to
+`use_gradient_checkpointing=True` (HF per-layer). grpo_07 keeps a `GRPO_GC=unsloth|hf|off`
+env gate (default `hf`) plus `GRPO_ANOMALY=1` / `GRPO_MAX_STEPS=N` for future probes.
+Costs: HF GC keeps layer-boundary activations on GPU (no CPU offload) — slightly higher
+VRAM than unsloth GC; watch the first full runs on the 8B models. Still open: bug (a)
+logp mismatch (Qwen*/DeepSeek-R1), and grpo_07's LoRA only covering `o_proj`+`down_proj`
+(Phi-4-mini's fused `qkv_proj`/`gate_up_proj` don't match the target regex — add them
+explicitly after retraining starts working).
+
+**Bug (c), found 2026-07-24 right after the GC fix — progressive vLLM-engine corruption
+once real updates flow.** First genuine training ever (grpo_07 steps 1–4: grad_norm
+0.063→0.049, KL 0.002–0.007, all finite), then generations rot progressively: batches
+34–36 coherent → 37 malformed → 38–39 gibberish → 41+ single-token loops
+(`AddAddAdd…`) — with the adapter CONSTANT between optimizer steps, and update
+magnitudes (warmup lr ~1e-7, clip 0.1) mathematically incapable of altering
+generations. loss 2.8e24 / KL 2.8e27 / grad_norm inf at step 5 are downstream of
+scoring garbage text (clip 0.1/inf then zeroes all grads). Ruled out: all 7 pwr
+overlay patches live (audit clean); vLLM standby/sleep default OFF. Leading
+hypothesis: corruption confined to the vLLM engine side (own weight copy + LoRA
+hot-load slots), triggered by the first-ever nonzero `lora_B` sync — or stray OOB
+writes into the shared VRAM pool (same defect family as the grpo_04 backward assert).
+
+Probe status at session close (2026-07-24 night):
+- No-vLLM control (`GRPO_NO_VLLM=1`, rollouts via HF generate) is BLOCKED by two
+  independent issues: (i) `attn_implementation="flash_attention_2"` requires the
+  `flash_attn` package, absent on this host → script now falls back to `sdpa` for the
+  no-vLLM path (TODO: package a `flash-attn` ebuild in the pwr overlay — several HF
+  paths won't work without it); (ii) after that, unsloth's `unsloth_base_fast_generate`
+  → transformers `_sample` crashes with `multinomial: prob_dist must be 1 or 2 dim`
+  (separate unsloth/transformers drift bug, unfixed).
+- Integrity probe VERDICT (`grpo07_integrity1.log`, 10 steps): `base-drift: none`
+  (frozen weights untouched — vLLM engine and OOB-writer theories eliminated),
+  gradients clean, but **`|B|max` grows exactly ×256 per step**
+  (8.5e-4 → 0.219 → 56 → 1.4e4 → … → 6.2e13). 256 = 2⁸ = the LoRA scale
+  s = alpha/r = 2 (grpo_07 uses alpha=2·rank) applied **in-place 8×/step** (once per
+  generation round). Culprit: `unsloth_zoo/vllm_utils.py` `load_lora_directly()`
+  (~line 2846): `vllm_lora_B.copy_(model_lora_B); vllm_lora_B *= s` — when the vLLM
+  buffer aliases the training tensor (zero-copy colocation), `copy_` is a self-copy
+  no-op and `*= s` compounds on the TRAINING weights. Invisible historically because
+  (i) with the GC bug B was always zero, and (ii) with alpha=rank (grpo_01/02/03/06
+  and most unsloth examples) s=1. Only surfaces when real training ∧ alpha≠rank.
+  Next: prove aliasing via `data_ptr()` comparison; immediate workaround = set
+  `lora_alpha=lora_rank` in grpo_07/08 (do NOT rerun grpo_07 without this — it
+  explodes again by step ~4); proper fix = pwr overlay patch scaling into a temp
+  (upstream-PR candidate).
 
 Next steps:
 
