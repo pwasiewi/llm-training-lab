@@ -105,6 +105,7 @@ Scheme: no suffix = training · `_cont` = continuation · `_test` = evaluation o
 | `grpo_05_qwen3_8b_gsm8k.py` ★ | Qwen3-8B | 8B | ~5GB | 5e-6 | 32 | hybrid `/think`, `<think>` format |
 | `grpo_06_dapo_llama8b_gsm8k.py` | Llama-3.1-8B | 8B | ~5GB | 5e-6 | 32 | DAPO: beta=0, overlong penalty, gen=8 |
 | `grpo_07_phi4_14b_gsm8k.py` ★ | Phi-4 | 14B | ~9GB | 2e-6 | 16 | strongest reasoning/math per param |
+| `grpo_07_1_phi4_gsm8k.py` ★ | Phi-4-mini-instruct | 3.8B | ~5GB | 2e-6 | 16 | no-vLLM variant: rollouts via HF `generate`, `GRPO_ATTN_IMPL=flash_attention_2` |
 | `grpo_08_qwen3_14b_gsm8k.py` ★ | Qwen3-14B | 14B | ~9GB | 2e-6 | 16 | largest fitting in 16GB |
 
 #### Baseline Tests (no fine-tuning)
@@ -134,10 +135,19 @@ script sits in one of three buckets:
 | Script | Status | Why |
 |---|---|---|
 | **grpo_07** (Phi-4-mini) | ✅ confirmed working | Full epoch (935/935 steps) + GSM8K eval showing a real improvement over the base model (format 52%→85%, accuracy 86.3%→87.7%) |
+| **grpo_07_1** (Phi-4-mini, no-vLLM, fa2) | ✅ confirmed working (2026-07-26) | Full epoch (935/935 steps, ~25h), healthy KL/grad_norm throughout, in-training merge clean (no live-vLLM alias possible). GSM8K eval: format 80.97% (1068/1319), accuracy 88.25% (1164/1319) — matches/slightly beats grpo_07's vLLM-trained result (87.72% acc), confirming the bug (e) `UNSLOTH_DISABLE_FAST_GENERATION` bypass yields a fully functional training path, not just smoke-clean |
 | **grpo_01** (gemma-3-1b) | ✅ confirmed working (smoke) | Re-checked 2026-07-24: the script's `use_gradient_checkpointing=True` fix had been left **commented out** (bug (b) was never actually applied here — unsloth's default is `"unsloth"` GC, the broken mode), which is why the only pre-existing log (2026-07-20) showed `grad_norm: nan/inf` every step. Fixed and re-run (`GRPO_MAX_STEPS=5`): `non-finite(B grads)=0/182` on **all 5 steps**, `\|B\|max` grows monotonically (0→2.2e-5→7.8e-5→1.1e-4, nowhere near the ×256 bug-(c) explosion), `grad_norm` finite every step, KL stays 0.0008–0.0015. Only a 5-step smoke, not a full epoch — but the signature matches grpo_07's validated pattern exactly |
 | **grpo_08** (Qwen3-4B) | ❌ confirmed blocked | Smoke 2026-07-24 (post-fix): `\|B\|max=0` on all 5 steps, `non-finite(B grads)=252/252` every step, KL up to 1.36e6 — bug (a) blocks training, not just cosmetic |
 | **grpo_06** (DAPO Llama-8B) | ❌ confirmed blocked | `non-finite=448/448` from step 1 in both compiled and eager mode — DAPO loss math itself (beta=0), independent of bug (a)/(b) |
 | grpo_02/03/04/05/09 | ❓ not re-tested post-fix | Pre-fix KL audit flagged 02/04/05 "sick" (bug (a), Qwen/DeepSeek-R1 family) and 03 inconclusive (resumes from checkpoint); none have been rerun with the GC fix or a `\|B\|max` tripwire — and given the grpo_01 lesson, **check each script's actual `get_peft_model` call, not just memory/README claims, before trusting any "fix applied" note** |
+
+GSM8K test-set eval (1319 examples, `grpo_07_phi4_14b_gsm8k_test.py`, greedy decoding), base model in both cases `microsoft/Phi-4-mini-instruct`:
+
+| Model | Format compliance | Accuracy |
+|---|---|---|
+| base `Phi-4-mini-instruct` | 52.24% (689/1319) | 86.28% (1138/1319) |
+| grpo_07 (vLLM rollouts) | 85.29% (1125/1319) | 87.72% (1157/1319) |
+| grpo_07_1 (fa2, no-vLLM) | 80.97% (1068/1319) | 88.25% (1164/1319) |
 
 Bottom line: don't trust any script's old "healthy" KL verdict as proof it trains, and
 don't trust a changelog saying a fix was "applied to all scripts" without grepping the
@@ -333,6 +343,7 @@ All `*_test.py` files load a saved model (merged 16-bit) and evaluate it on the 
 | `grpo_04_deepseek_r1_8b_gsm8k_test.py` | `outputs/lora-grpo-deepseek-r1-llama8b` | `<reasoning>` + `<answer>` |
 | `grpo_05_qwen3_8b_gsm8k_test.py` | `outputs/lora-grpo-qwen3-8b` | `<think>` + `<answer>` |
 | `grpo_07_phi4_14b_gsm8k_test.py` | `outputs/lora-grpo-phi4` | `<reasoning>` + `<answer>` |
+| `grpo_07_phi4_14b_gsm8k_test.py` (reused) | `outputs/lora-grpo-phi4-mini-novllm` | `<reasoning>` + `<answer>` (grpo_07_1 no-vLLM/fa2 run) |
 | `grpo_08_qwen3_14b_gsm8k_test.py` | `outputs/lora-grpo-qwen3-14b` | `<think>` + `<answer>` |
 | `gsm8k_openai_1_test_500.py` | GPT-4o | baseline (API) |
 | `gsm8k_grokai_1_test_500.py` | Grok (xAI) | baseline (API) |
@@ -375,6 +386,8 @@ All model checkpoints, saved models, and logs are written to `outputs/` (exclude
 outputs/
   lora-grpo-phi4/                  # merged 16-bit model (grpo_07)
   lora-grpo-phi4-outputs/          # training checkpoints
+  lora-grpo-phi4-mini-novllm/          # merged 16-bit model (grpo_07_1, no-vLLM/fa2)
+  lora-grpo-phi4-mini-novllm-outputs/  # training checkpoints
   lora-grpo-qwen3-14b/
   lora-grpo-qwen3-14b-outputs/
   ...
