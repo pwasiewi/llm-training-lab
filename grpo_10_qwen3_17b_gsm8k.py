@@ -17,7 +17,6 @@ from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
 import re
-import os
 from datasets import load_dataset, Dataset
 from tqdm import tqdm
 
@@ -26,23 +25,28 @@ os.environ["VLLM_USE_V1"] = "0"
 os.environ["FLASH_ATTENTION_USE_FA2"] = "1"
 os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 
-# Qwen3-14B — largest model that fits on 16GB VRAM in 4-bit (~9GB).
-# Hybrid thinking mode like Qwen3-8B: uses <think>...</think> natively.
-# Strongest model in this collection for GSM8K reasoning.
-# lr=2e-6 and batch=2 for 14B memory budget.
-# 14B does NOT fit on 16 GB with colocated vLLM: ~9 GiB per copy x2 (training +
-# rollout engine) > VRAM. Even Qwen3-8B failed (see grpo_05). Use Qwen3-4B
-# (rank-16 variant; grpo_05 trains the same base at rank 32 — separate outputs).
-model_name = "Qwen/Qwen3-4B"
-model_path = "outputs/lora-grpo-qwen3-4b-r16"
-max_seq_length = 2048  # 4096 OOMs vLLM LoRA-manager init on 16 GB (grpo_05 lesson)
+# Qwen3-1.7B in bf16 — the best SMALL Qwen that can actually train on this box.
+# Bug (a) root cause (probes 2026-07-26, grpo_02_buga_bf16_smoke.py): with
+# load_in_4bit=True the trainer copy and the colocated vLLM engine copy are
+# bnb-4bit-quantized INDEPENDENTLY and disagree numerically; on sharp-logit
+# checkpoints (whole Qwen family + R1-distill; gemma/llama/phi tolerate it) the
+# per-token logp gap explodes and poisons every LoRA-B grad (non-finite from
+# step 1, |B| stays 0) or crashes backward with an OOB gather assert. In bf16
+# both sides share one numerical identity and training is healthy.
+# Sizing: bf16 needs TWO weight copies (trainer + engine): 1.7B -> ~7 GiB, fits;
+# Qwen3-4B bf16 (~8 GiB x2) does NOT fit 16 GB, so grpo_08 stays 4-bit-blocked.
+# Qwen3-1.7B is hybrid-thinking; /no_think in the prompt pins the non-thinking
+# mode (the completion then starts with an EMPTY <think>\n\n</think> block).
+model_name = "Qwen/Qwen3-1.7B"
+model_path = "outputs/lora-grpo-qwen3-17b-r16"
+max_seq_length = 2048
 max_prompt_length = 512
-lora_rank = 16   # smaller rank for 14B memory efficiency
+lora_rank = 16
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
-    load_in_4bit=True,
+    load_in_4bit=False,  # bf16 both sides — the bug (a) fix; see header
     attn_implementation="flash_attention_2",
     device_map="auto",
     fast_inference=True,
@@ -53,10 +57,14 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 model = FastLanguageModel.get_peft_model(
     model,
     r=lora_rank,
+    # Qwen3 keeps attention/MLP projections UNFUSED at the HF level.
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                     "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=lora_rank * 2,
-    use_gradient_checkpointing="unsloth",
+    # alpha=rank (s=1) + doubled lr: kept from the bug (c) era to minimize
+    # variables; the dealias pwr patch (upstream PR unsloth-zoo#951) makes
+    # alpha != rank legal again if a higher scale is ever wanted.
+    lora_alpha=lora_rank,
+    use_gradient_checkpointing=True,  # HF per-layer GC; "unsloth" offload GC produces NaN grads -> no-op training (probes 2026-07-24, see README)
     random_state=3407,
 )
 
@@ -73,7 +81,7 @@ def extract_answer(text: str) -> str:
             return str(-value if whole.startswith('-') else value)
         # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
         # then drop comma thousands separators
-        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
+        norm = re.sub(r'[$€£\s]', '', content).replace(',', '')
         if re.fullmatch(r'-?\d+(\.\d+)?', norm):
             return norm
     if "####" in text:
@@ -90,8 +98,9 @@ def get_gsm8k_questions(split="train") -> Dataset:
                 "You are a helpful math assistant. "
                 "Think through the problem carefully, then give the final numerical answer in <answer>...</answer> tags."
             )},
+            # /no_think pins the non-thinking mode of the hybrid Qwen3 template.
             {'role': 'user', 'content': (
-                f"/think\n\nSolve this problem step by step. "
+                f"/no_think\n\nSolve this problem step by step. "
                 f"End your response with <answer>NUMBER</answer>.\n\nProblem:\n{x['question']}"
             )}
         ],
@@ -135,27 +144,22 @@ def int_reward_func(completions, **kwargs) -> list[float]:
     extracted = [extract_answer(r) for r in responses]
     return [0.5 if is_integer_like(r) else 0.0 for r in extracted]
 
-def has_think_tags(completions, **kwargs) -> list[float]:
-    responses = [c[0]["content"] for c in completions]
-    return [0.5 if ("<think>" in r and "</think>" in r) else 0.0 for r in responses]
-
-def starts_with_think_tag(completions, **kwargs) -> list[float]:
-    return [1.0 if c[0]["content"].strip().startswith("<think>") else 0.0 for c in completions]
-
 def has_answer_tag(completions, **kwargs) -> list[float]:
     pattern = r"<answer>.*?</answer>"
     responses = [c[0]["content"] for c in completions]
     return [0.5 if re.search(pattern, r, flags=re.DOTALL) else 0.0 for r in responses]
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    pattern = r"^<think>\s*.*?\s*</think>.*?<answer>\s*.*?\s*</answer>\s*$"
+    # Non-thinking format: free-form reasoning (an empty <think></think> block from
+    # /no_think is fine), response ENDS with the answer tag.
+    pattern = r"^.*?<answer>\s*.*?\s*</answer>\s*$"
     responses = [c[0]["content"] for c in completions]
     matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses]
     return [0.5 if m else 0.0 for m in matches]
 
 training_args = GRPOConfig(
     use_vllm=True,
-    learning_rate=2e-6,
+    learning_rate=4e-6,   # 2e-6 doubled to offset LoRA scale s: 2 -> 1 (alpha=rank workaround)
     adam_beta1=0.9,
     adam_beta2=0.99,
     weight_decay=0.1,
@@ -180,6 +184,10 @@ training_args = GRPOConfig(
     max_completion_length=max_seq_length - max_prompt_length,
     vllm_max_model_length=max_seq_length,
     num_train_epochs=1,
+    # GRPO_BETA=0 drops the KL term (no ref adapter, DAPO-style).
+    beta=float(os.environ.get("GRPO_BETA", "0.001")),
+    # GRPO_MAX_STEPS=N caps the run for a smoke test; -1 = full epoch.
+    max_steps=int(os.environ.get("GRPO_MAX_STEPS", "-1")),
     save_strategy="steps",
     save_steps=50,
     max_grad_norm=0.1,
@@ -191,8 +199,6 @@ trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=[
-        starts_with_think_tag,
-        has_think_tags,
         has_answer_tag,
         strict_format_reward_func,
         int_reward_func,
@@ -201,6 +207,35 @@ trainer = GRPOTrainer(
     args=training_args,
     train_dataset=dataset,
 )
+
+# --- Integrity tripwire (bug (c), grpo_07 validated 2026-07-24) ---
+# With lora_alpha == lora_rank the in-place s=alpha/r scaling in unsloth_zoo
+# load_lora_directly is a no-op, so |B| grows slowly (~lr x steps) and stays well
+# below 1.0. If |B|max ever nears 1.0 the aliased-buffer scaling is back (someone
+# raised alpha, or the pwr patch regressed) -> rollouts rot into gibberish within a
+# few steps. Abort instead of burning an epoch. Also prints a first-steps health line
+# so the run can be confirmed live (nonzero grads, no non-finite).
+_lora_B = [(n, p) for n, p in model.named_parameters() if p.requires_grad and "lora_B" in n]
+_tw_step = {"n": 0}
+
+def _integrity_tripwire(optimizer, *args, **kwargs):
+    _tw_step["n"] += 1
+    b_max = max((p.data.abs().max().item() for _, p in _lora_B), default=0.0)
+    if b_max > 1.0:
+        raise RuntimeError(
+            f"[TRIPWIRE] |B|max={b_max:.3e} at step {_tw_step['n']} — bug (c) aliased-buffer "
+            "LoRA scaling regression; check lora_alpha == lora_rank and "
+            "unsloth_zoo vllm_utils.load_lora_directly.")
+    if _tw_step["n"] <= 10 or _tw_step["n"] % 25 == 0:
+        nonfinite = sum(1 for _, p in _lora_B if p.grad is not None and not torch.isfinite(p.grad).all())
+        gmax = max((p.grad.abs().max().item() for _, p in _lora_B
+                    if p.grad is not None and torch.isfinite(p.grad).all()), default=0.0)
+        print(f"[TRIPWIRE step {_tw_step['n']}] |B|max={b_max:.3e} grad|max={gmax:.3e} "
+              f"non-finite(B grads)={nonfinite}/{len(_lora_B)}", flush=True)
+
+from torch.optim.optimizer import register_optimizer_step_pre_hook
+register_optimizer_step_pre_hook(_integrity_tripwire)
+# --- end tripwire ---
 
 def check_lengths(dataset, tokenizer, max_prompt_length, max_seq_length):
     too_long = 0
@@ -225,4 +260,20 @@ torch._dynamo.config.recompile_limit = 1024
 torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train()
-model.save_pretrained_merged(model_path, tokenizer, save_method="merged_16bit")
+
+# bug (d), 2026-07-24: unsloth's in-process save_pretrained_merged reads base
+# weights through memory aliased with the live vLLM pool -> o_proj/down_proj
+# garbage (~1e13). Save only the adapter (small LoRA tensors, safe to read),
+# then merge in a clean CPU-only subprocess that loads base + adapter from
+# disk and cannot alias the engine.
+# Manual re-run: python grpo_merge.py outputs/lora-grpo-qwen3-17b-r16 adapter-final --base Qwen/Qwen3-1.7B
+final_adapter = os.path.join(f"{model_path}-outputs", "adapter-final")
+model.save_pretrained(final_adapter)
+tokenizer.save_pretrained(final_adapter)
+import subprocess, sys
+subprocess.run(
+    [sys.executable,
+     os.path.join(os.path.dirname(os.path.abspath(__file__)), "grpo_merge.py"),
+     model_path, "adapter-final", "--base", model_name],
+    check=True,
+)

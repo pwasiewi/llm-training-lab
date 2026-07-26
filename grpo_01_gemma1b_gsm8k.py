@@ -316,7 +316,6 @@ trainer.train()
 
 # Do NOT save_pretrained_merged here: with the vLLM engine still live it aliases the
 # rollout memory pool and corrupts o_proj/down_proj to ~1e13 (bug (d), grpo_07 proved
-# it 2026-07-24). Merge offline from the checkpoint instead (write grpo_01_merge.py
-# following the grpo_07_merge.py / grpo_08_merge.py pattern if this script graduates
-# past the smoke stage).
-print("Training done. Do not trust an in-script merge — re-merge offline from a checkpoint.", flush=True)
+# it 2026-07-24). Merge offline from a checkpoint with the universal CPU-only merge:
+#     python grpo_merge.py MODEL_PATH [checkpoint-N] --base <original 16-bit model>
+print("Training done. Merge offline: python grpo_merge.py MODEL_PATH --base <16-bit model>", flush=True)

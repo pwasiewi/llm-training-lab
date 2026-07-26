@@ -26,13 +26,19 @@ os.environ["VLLM_USE_V1"] = "0"
 os.environ["FLASH_ATTENTION_USE_FA2"] = "1"
 os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 
-# Qwen3-4B — hybrid thinking mode (uses <think>...</think> natively), strong on GSM8K.
-# Originally slated as Qwen3-14B, but 14B does NOT fit on 16 GB with colocated vLLM:
-# ~9 GiB per copy x2 (training + rollout engine) > VRAM. Even Qwen3-8B failed (grpo_05).
-# So this trains Qwen3-4B at rank 16 (grpo_05 trains the same base at rank 32 — separate
-# outputs). lr=4e-6 (2e-6 doubled to offset the alpha=rank s=1 workaround, bug (c)).
-model_name = "Qwen/Qwen3-4B"
-model_path = "outputs/lora-grpo-qwen3-4b-r16"
+# Qwen3-4B-Instruct-2507 — the July-2025 refresh of Qwen3-4B: same dense Qwen3
+# architecture (unfused q/k/v/o + gate/up/down, target_modules unchanged) but
+# NON-thinking (no <think> blocks; prompt and rewards below are answer-tag only)
+# and much stronger than the April base. Swapped in 2026-07-26: the original
+# Qwen3-4B checkpoint is a bug (a) carrier (non-finite LoRA-B grads from step 1,
+# KL -> 1e6 by step 4; the discriminator is WEIGHTS, not architecture — gemma/
+# llama/phi train clean on the same stack), so a sibling checkpoint of the same
+# arch is both the fix candidate and the cleanest test of that hypothesis.
+# Qwen3.5 small (DeltaNet+MoE hybrid, multimodal) rejected for now: unsloth
+# FastLanguageModel + vLLM LoRA hot-load do not cover that architecture.
+# 14B/8B do not fit on 16 GB with colocated vLLM (grpo_05 lesson); rank 16 here.
+model_name = "Qwen/Qwen3-4B-Instruct-2507"
+model_path = "outputs/lora-grpo-qwen3-4b-2507-r16"
 max_seq_length = 2048  # 4096 OOMs vLLM LoRA-manager init on 16 GB (grpo_05 lesson)
 max_prompt_length = 512
 lora_rank = 16   # rank-16 variant (grpo_05 uses rank 32 on the same base)
@@ -56,10 +62,10 @@ model = FastLanguageModel.get_peft_model(
     # qkv_proj/gate_up_proj). Do NOT switch to fused names here.
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                     "gate_proj", "up_proj", "down_proj"],
-    # alpha MUST equal rank (s=1): bug (c) — unsloth_zoo load_lora_directly applies
-    # s=alpha/r IN-PLACE on an aliased vLLM buffer 8x per step, so any s>1 compounds
-    # (s=2 -> |B|max x256/step -> gibberish rollouts). grpo_07 proved this end-to-end
-    # (2026-07-24). Until the temp-buffer pwr patch lands, s must be 1.
+    # alpha=rank (s=1) + doubled lr: the validated-equivalent workaround for
+    # bug (c). The dealias pwr patch (2026-07-26, upstream PR unsloth-zoo#951)
+    # makes alpha != rank legal again, but this pairing is kept to minimize
+    # variables while the checkpoint swap is under test.
     lora_alpha=lora_rank,
     use_gradient_checkpointing=True,  # HF per-layer GC; "unsloth" offload GC produces NaN grads -> no-op training (probes 2026-07-24, see README)
     random_state=3407,
@@ -95,8 +101,9 @@ def get_gsm8k_questions(split="train") -> Dataset:
                 "You are a helpful math assistant. "
                 "Think through the problem carefully, then give the final numerical answer in <answer>...</answer> tags."
             )},
+            # Instruct-2507 is non-thinking: no /think flag, no <think> blocks.
             {'role': 'user', 'content': (
-                f"/think\n\nSolve this problem step by step. "
+                f"Solve this problem step by step. "
                 f"End your response with <answer>NUMBER</answer>.\n\nProblem:\n{x['question']}"
             )}
         ],
@@ -140,20 +147,15 @@ def int_reward_func(completions, **kwargs) -> list[float]:
     extracted = [extract_answer(r) for r in responses]
     return [0.5 if is_integer_like(r) else 0.0 for r in extracted]
 
-def has_think_tags(completions, **kwargs) -> list[float]:
-    responses = [c[0]["content"] for c in completions]
-    return [0.5 if ("<think>" in r and "</think>" in r) else 0.0 for r in responses]
-
-def starts_with_think_tag(completions, **kwargs) -> list[float]:
-    return [1.0 if c[0]["content"].strip().startswith("<think>") else 0.0 for c in completions]
-
 def has_answer_tag(completions, **kwargs) -> list[float]:
     pattern = r"<answer>.*?</answer>"
     responses = [c[0]["content"] for c in completions]
     return [0.5 if re.search(pattern, r, flags=re.DOTALL) else 0.0 for r in responses]
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    pattern = r"^<think>\s*.*?\s*</think>.*?<answer>\s*.*?\s*</answer>\s*$"
+    # Non-thinking format: free-form reasoning, response ENDS with the answer tag
+    # (no trailing chatter after </answer>).
+    pattern = r"^.*?<answer>\s*.*?\s*</answer>\s*$"
     responses = [c[0]["content"] for c in completions]
     matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses]
     return [0.5 if m else 0.0 for m in matches]
@@ -185,6 +187,11 @@ training_args = GRPOConfig(
     max_completion_length=max_seq_length - max_prompt_length,
     vllm_max_model_length=max_seq_length,
     num_train_epochs=1,
+    # GRPO_BETA=0 drops the KL term (no ref adapter, DAPO-style). Probe for
+    # bug (a): with |B|=0 policy == ref, yet kl logs ~1e3-1e6 from step 1 on
+    # Qwen-family checkpoints — the k3 estimator exp(d)-d-1 then overflows and
+    # is the suspected source of the non-finite LoRA-B grads.
+    beta=float(os.environ.get("GRPO_BETA", "0.001")),
     # GRPO_MAX_STEPS=N caps the run for a smoke test; -1 = full epoch.
     max_steps=int(os.environ.get("GRPO_MAX_STEPS", "-1")),
     save_strategy="steps",
@@ -198,8 +205,6 @@ trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=[
-        starts_with_think_tag,
-        has_think_tags,
         has_answer_tag,
         strict_format_reward_func,
         int_reward_func,
@@ -262,9 +267,19 @@ torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train()
 
-# Do NOT save_pretrained_merged here: with the vLLM engine still live it aliases the
-# rollout memory pool and corrupts o_proj/down_proj to ~1e13 (bug (d), grpo_07 proved
-# it 2026-07-24). Merge offline from the checkpoint instead:
-#     python grpo_08_merge.py            # newest checkpoint
-#     python grpo_08_merge.py checkpoint-935
-print("Training done. Merge offline with: python grpo_08_merge.py", flush=True)
+# bug (d), 2026-07-24: unsloth's in-process save_pretrained_merged reads base
+# weights through memory aliased with the live vLLM pool -> o_proj/down_proj
+# garbage (~1e13). Save only the adapter (small LoRA tensors, safe to read),
+# then merge in a clean CPU-only subprocess that loads base + adapter from
+# disk and cannot alias the engine.
+# Manual re-run: python grpo_merge.py outputs/lora-grpo-qwen3-4b-2507-r16 adapter-final --base Qwen/Qwen3-4B-Instruct-2507
+final_adapter = os.path.join(f"{model_path}-outputs", "adapter-final")
+model.save_pretrained(final_adapter)
+tokenizer.save_pretrained(final_adapter)
+import subprocess, sys
+subprocess.run(
+    [sys.executable,
+     os.path.join(os.path.dirname(os.path.abspath(__file__)), "grpo_merge.py"),
+     model_path, "adapter-final", "--base", model_name],
+    check=True,
+)

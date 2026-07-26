@@ -27,11 +27,12 @@ os.environ["VLLM_USE_V1"] = "0"
 os.environ["FLASH_ATTENTION_USE_FA2"] = "1"
 os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 
-# Qwen3-4B — largest Qwen3 that fits on 16GB VRAM in 4-bit with colocated vLLM.
-# Hybrid thinking mode: uses <think>...</think> natively (/think in the prompt).
-# 14B does NOT fit on 16 GB with colocated vLLM (~9 GiB per copy x2). Use Qwen3-4B r16.
-model_name = "Qwen/Qwen3-4B"
-model_path = "outputs/lora-grpo-qwen3-4b-r16"
+# Qwen3-4B-Instruct-2507 — NON-thinking refresh of Qwen3-4B (same dense arch,
+# different weights; swap 2026-07-26, see grpo_08_qwen3_4b_gsm8k.py header for
+# the bug (a) rationale). Prompt and rewards are answer-tag only, no <think>.
+# 14B does NOT fit on 16 GB with colocated vLLM (~9 GiB per copy x2). Rank 16.
+model_name = "Qwen/Qwen3-4B-Instruct-2507"
+model_path = "outputs/lora-grpo-qwen3-4b-2507-r16"
 max_seq_length = 2048  # 4096 OOMs vLLM LoRA-manager init on 16 GB (grpo_05 lesson)
 max_prompt_length = 512
 lora_rank = 16   # smaller rank for memory efficiency
@@ -109,8 +110,9 @@ def get_gsm8k_questions(split="train") -> Dataset:
                 "You are a helpful math assistant. "
                 "Think through the problem carefully, then give the final numerical answer in <answer>...</answer> tags."
             )},
+            # Instruct-2507 is non-thinking: no /think flag, no <think> blocks.
             {'role': 'user', 'content': (
-                f"/think\n\nSolve this problem step by step. "
+                f"Solve this problem step by step. "
                 f"End your response with <answer>NUMBER</answer>.\n\nProblem:\n{x['question']}"
             )}
         ],
@@ -154,20 +156,15 @@ def int_reward_func(completions, **kwargs) -> list[float]:
     extracted = [extract_answer(r) for r in responses]
     return [0.5 if is_integer_like(r) else 0.0 for r in extracted]
 
-def has_think_tags(completions, **kwargs) -> list[float]:
-    responses = [c[0]["content"] for c in completions]
-    return [0.5 if ("<think>" in r and "</think>" in r) else 0.0 for r in responses]
-
-def starts_with_think_tag(completions, **kwargs) -> list[float]:
-    return [1.0 if c[0]["content"].strip().startswith("<think>") else 0.0 for c in completions]
-
 def has_answer_tag(completions, **kwargs) -> list[float]:
     pattern = r"<answer>.*?</answer>"
     responses = [c[0]["content"] for c in completions]
     return [0.5 if re.search(pattern, r, flags=re.DOTALL) else 0.0 for r in responses]
 
 def strict_format_reward_func(completions, **kwargs) -> list[float]:
-    pattern = r"^<think>\s*.*?\s*</think>.*?<answer>\s*.*?\s*</answer>\s*$"
+    # Non-thinking format: free-form reasoning, response ENDS with the answer tag
+    # (no trailing chatter after </answer>).
+    pattern = r"^.*?<answer>\s*.*?\s*</answer>\s*$"
     responses = [c[0]["content"] for c in completions]
     matches = [re.match(pattern, r, flags=re.DOTALL) for r in responses]
     return [0.5 if m else 0.0 for m in matches]
@@ -210,8 +207,6 @@ trainer = GRPOTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=[
-        starts_with_think_tag,
-        has_think_tags,
         has_answer_tag,
         strict_format_reward_func,
         int_reward_func,
@@ -245,8 +240,19 @@ torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train(resume_from_checkpoint=checkpoint_path)
 
-# Do NOT save_pretrained_merged here: with the vLLM engine still live it aliases the
-# rollout memory pool and corrupts o_proj/down_proj to ~1e13 (bug (d), grpo_07 proved
-# it 2026-07-24). Merge offline from the checkpoint instead:
-#     python grpo_08_merge.py
-print("Training done. Merge offline with: python grpo_08_merge.py", flush=True)
+# bug (d), 2026-07-24: unsloth's in-process save_pretrained_merged reads base
+# weights through memory aliased with the live vLLM pool -> o_proj/down_proj
+# garbage (~1e13). Save only the adapter (small LoRA tensors, safe to read),
+# then merge in a clean CPU-only subprocess that loads base + adapter from
+# disk and cannot alias the engine.
+# Manual re-run: python grpo_merge.py outputs/lora-grpo-qwen3-4b-2507-r16 adapter-final --base Qwen/Qwen3-4B-Instruct-2507
+final_adapter = os.path.join(f"{model_path}-outputs", "adapter-final")
+model.save_pretrained(final_adapter)
+tokenizer.save_pretrained(final_adapter)
+import subprocess, sys
+subprocess.run(
+    [sys.executable,
+     os.path.join(os.path.dirname(os.path.abspath(__file__)), "grpo_merge.py"),
+     model_path, "adapter-final", "--base", model_name],
+    check=True,
+)

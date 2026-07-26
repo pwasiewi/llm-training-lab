@@ -34,7 +34,9 @@ checkpoint_path = f"{model_path}-outputs/checkpoint-200"  # Path to your last ch
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
-    load_in_4bit=True,
+    # bf16, NOT 4-bit — bug (a) root cause: independently quantized trainer/vLLM
+    # copies diverge on Qwen checkpoints -> non-finite grads (see grpo_02_qwen15b_gsm8k.py).
+    load_in_4bit=False,
     fast_inference=True,
     gpu_memory_utilization=0.5,  # 0.8 left too little VRAM for the colocated training step (OOM at step 12 on 16 GB)
     adapter_name=checkpoint_path  # This loads the LoRA weights from the checkpoint
@@ -223,5 +225,19 @@ torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train()
 
-# Save final model
-model.save_pretrained_merged(model_path, tokenizer, save_method="merged_16bit")
+# bug (d), 2026-07-24: unsloth's in-process save_pretrained_merged reads base
+# weights through memory aliased with the live vLLM pool -> o_proj/down_proj
+# garbage (~1e13). Save only the adapter (small LoRA tensors, safe to read),
+# then merge in a clean CPU-only subprocess that loads base + adapter from
+# disk and cannot alias the engine.
+# Manual re-run: python grpo_merge.py outputs/lora-grpo-qwen3 adapter-final --base Qwen/Qwen2.5-1.5B-Instruct
+final_adapter = os.path.join(f"{model_path}-outputs", "adapter-final")
+model.save_pretrained(final_adapter)
+tokenizer.save_pretrained(final_adapter)
+import subprocess, sys
+subprocess.run(
+    [sys.executable,
+     os.path.join(os.path.dirname(os.path.abspath(__file__)), "grpo_merge.py"),
+     model_path, "adapter-final", "--base", model_name],
+    check=True,
+)

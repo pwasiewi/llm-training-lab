@@ -97,7 +97,7 @@ Scheme: no suffix = training · `_cont` = continuation · `_test` = evaluation o
 | File | Model | Params | VRAM 4-bit | lr | LoRA rank | Notes |
 |------|-------|--------|------------|----|-----------|----|
 | `grpo_01_gemma1b_gsm8k.py` | gemma-3-1b-it | 1B | ~1GB | 3e-6 | 32 | small model baseline |
-| `grpo_02_qwen15b_gsm8k.py` | Qwen2.5-1.5B-Instruct | 1.5B | ~2GB | 5e-6 | 64 | math-specialist |
+| `grpo_02_qwen15b_gsm8k.py` | Qwen2.5-1.5B-Instruct | 1.5B | ~3GB bf16 | 5e-6 | 64 | math-specialist; **bf16 since 2026-07-26** (bug (a) fix) |
 | `grpo_02_qwen15b_gsm8k_cont.py` | Qwen2.5-1.5B | — | ~2GB | 5e-6 | 64 | continuation |
 | `grpo_03_llama8b_gsm8k.py` | Llama-3.1-8B-Instruct | 8B | ~5GB | 5e-6 | 32 | FA2, `starts_with_reasoning_tag` |
 | `grpo_03_llama8b_gsm8k_cont.py` | Llama-3.1-8B | — | ~5GB | 5e-6 | 32 | continuation from checkpoint-2400 |
@@ -106,7 +106,8 @@ Scheme: no suffix = training · `_cont` = continuation · `_test` = evaluation o
 | `grpo_06_dapo_llama8b_gsm8k.py` | Llama-3.1-8B | 8B | ~5GB | 5e-6 | 32 | DAPO: beta=0, overlong penalty, gen=8 |
 | `grpo_07_phi4_14b_gsm8k.py` ★ | Phi-4 | 14B | ~9GB | 2e-6 | 16 | strongest reasoning/math per param |
 | `grpo_07_1_phi4_gsm8k.py` ★ | Phi-4-mini-instruct | 3.8B | ~5GB | 2e-6 | 16 | no-vLLM variant: rollouts via HF `generate`, `GRPO_ATTN_IMPL=flash_attention_2` |
-| `grpo_08_qwen3_14b_gsm8k.py` ★ | Qwen3-14B | 14B | ~9GB | 2e-6 | 16 | largest fitting in 16GB |
+| `grpo_08_qwen3_4b_gsm8k.py` ★ | Qwen3-4B-Instruct-2507 | 4B | ~3GB | 4e-6 | 16 | non-thinking 2507 refresh; **blocked in 4-bit by bug (a)** — needs ≥24 GB for bf16 |
+| `grpo_10_qwen3_17b_gsm8k.py` ★ | Qwen3-1.7B | 1.7B | ~7GB bf16 (2 copies) | 4e-6 | 16 | best small Qwen that actually trains here; `/no_think`, bf16 both sides (bug (a) fix) |
 
 #### Baseline Tests (no fine-tuning)
 
@@ -137,7 +138,9 @@ script sits in one of three buckets:
 | **grpo_07** (Phi-4-mini) | ✅ confirmed working | Full epoch (935/935 steps) + GSM8K eval showing a real improvement over the base model (format 52%→85%, accuracy 86.3%→87.7%) |
 | **grpo_07_1** (Phi-4-mini, no-vLLM, fa2) | ✅ confirmed working (2026-07-26) | Full epoch (935/935 steps, ~25h), healthy KL/grad_norm throughout, in-training merge clean (no live-vLLM alias possible). GSM8K eval: format 80.97% (1068/1319), accuracy 88.25% (1164/1319) — matches/slightly beats grpo_07's vLLM-trained result (87.72% acc), confirming the bug (e) `UNSLOTH_DISABLE_FAST_GENERATION` bypass yields a fully functional training path, not just smoke-clean |
 | **grpo_01** (gemma-3-1b) | ✅ confirmed working (smoke) | Re-checked 2026-07-24: the script's `use_gradient_checkpointing=True` fix had been left **commented out** (bug (b) was never actually applied here — unsloth's default is `"unsloth"` GC, the broken mode), which is why the only pre-existing log (2026-07-20) showed `grad_norm: nan/inf` every step. Fixed and re-run (`GRPO_MAX_STEPS=5`): `non-finite(B grads)=0/182` on **all 5 steps**, `\|B\|max` grows monotonically (0→2.2e-5→7.8e-5→1.1e-4, nowhere near the ×256 bug-(c) explosion), `grad_norm` finite every step, KL stays 0.0008–0.0015. Only a 5-step smoke, not a full epoch — but the signature matches grpo_07's validated pattern exactly |
-| **grpo_08** (Qwen3-4B) | ❌ confirmed blocked | Smoke 2026-07-24 (post-fix): `\|B\|max=0` on all 5 steps, `non-finite(B grads)=252/252` every step, KL up to 1.36e6 — bug (a) blocks training, not just cosmetic |
+| **grpo_10** (Qwen3-1.7B, bf16) | ✅ confirmed working (smoke, 2026-07-26) | New script born from the bug (a) resolution (see below): bf16 on both sides, 2-step smoke clean (`non-finite=0/196`, KL 0, clip 0) + full pipeline incl. offline merge validated end-to-end |
+| **grpo_02** (Qwen2.5-1.5B, bf16) | ✅ smoke-clean via probe (2026-07-26) | `grpo_02_buga_bf16_smoke.py` (same model/config skeleton, bf16): `non-finite=0/196`, KL ~1e-4 — flipped the production script to `load_in_4bit=False`; full epoch not yet run |
+| **grpo_08** (Qwen3-4B-Instruct-2507) | ❌ blocked in 4-bit — root cause known | Smoke 2026-07-24 + 2026-07-26 (checkpoint swapped to 2507): `\|B\|max=0`, `non-finite=252/252` every step, KL up to 5.6e6 — bug (a), now root-caused (see "Bug (a) RESOLVED" below); 4B bf16 needs two ~8 GB copies → does not fit 16 GB |
 | **grpo_06** (DAPO Llama-8B) | ❌ confirmed blocked | `non-finite=448/448` from step 1 in both compiled and eager mode — DAPO loss math itself (beta=0), independent of bug (a)/(b) |
 | grpo_02/03/04/05/09 | ❓ not re-tested post-fix | Pre-fix KL audit flagged 02/04/05 "sick" (bug (a), Qwen/DeepSeek-R1 family) and 03 inconclusive (resumes from checkpoint); none have been rerun with the GC fix or a `\|B\|max` tripwire — and given the grpo_01 lesson, **check each script's actual `get_peft_model` call, not just memory/README claims, before trusting any "fix applied" note** |
 
@@ -299,6 +302,49 @@ Next steps:
 - Permanent guard for all scripts: assert KL < 1.0 at step 1 with a fresh LoRA, so a broken run
   dies after a minute instead of a day.
 
+**Bug (a) RESOLVED 2026-07-26 — root cause: two INDEPENDENTLY bnb-4bit-quantized copies
+of the model (trainer vs colocated vLLM engine) numerically disagree.** GRPO compares
+per-token logps across the two copies; on sharp-logit checkpoints (the whole Qwen family
++ DeepSeek-R1-distill) the quantization noise blows the per-token logp gap up by orders
+of magnitude, and `exp()` of that gap in the importance ratio poisons every LoRA-B
+gradient (non-finite from step 1 → optimizer skips → `|B|` stays 0 → the run silently
+never trains) or crashes backward with an OOB gather assert (the grpo_02/grpo_04
+`index out of bounds: 0 <= tmp0 < <vocab>` family). gemma/llama/phi have milder logit
+distributions and tolerate the same noise — which is exactly the "weights, not
+architecture" discriminator observed on 2026-07-24.
+
+Probe chain (logs `/var/tmp/grpo08_2507_*.log`, `/var/tmp/grpo02_buga_*.log`):
+
+| Probe | Config | Result |
+|---|---|---|
+| checkpoint swap | grpo_08 → `Qwen/Qwen3-4B-Instruct-2507` (different weights, same dense arch) | still sick (252/252 non-finite, KL 7475→5.6e6) → whole Qwen family, not one checkpoint |
+| compiled kernels | `UNSLOTH_COMPILE_DISABLE=1` | still sick → kernels exonerated |
+| KL term | `GRPO_BETA=0` | `kl=0` but grads still non-finite → KL estimator exonerated; telltale left standing: `clip_ratio ~6%` and loss 15–20 at step 1 with B=0 (healthy models: ratio≈1, loss≈0) = trainer-vs-engine logp divergence |
+| **A/B decider** | `grpo_02_buga_bf16_smoke.py` (Qwen2.5-1.5B, ONLY `load_in_4bit` toggled) | **bf16 clean** (0/196 non-finite, KL ~1e-4, clip ~3e-4) vs **4-bit sick** (backward OOB crash) |
+
+**Fix: `load_in_4bit=False` — one bf16 numerical identity shared by both sides.** The
+important nuance: 4-bit per se is NOT broken, the *pair of divergent quantized copies* is:
+
+| Configuration | Qwen / R1-distill (sharp logits) | gemma / llama / phi (mild logits) |
+|---|---|---|
+| 4-bit + colocated vLLM (2 copies) | **sick** (quant noise × sharp logits) | healthy (noise tolerated) |
+| bf16 + colocated vLLM (2 copies) | healthy (copies numerically identical) | healthy |
+| 4-bit, no vLLM (1 copy, HF-generate rollouts) | expected healthy — **untested** | healthy (grpo_07_1 validated on Phi) |
+
+Consequences on 16 GB (bf16 needs TWO full weight copies — trainer + engine):
+- ≤2B models train at full vLLM rollout speed: **grpo_10** (Qwen3-1.7B, new script,
+  smoke + merge validated) and **grpo_02** (Qwen2.5-1.5B) flipped to bf16.
+- Qwen3-4B (grpo_08, now on Instruct-2507) stays blocked in 4-bit: bf16 would need
+  2×8 GB. Escape hatches: a ≥24 GB GPU, a future matched-quantization scheme, or the
+  third row above — a grpo_07_1-style no-vLLM variant (`use_vllm=False` +
+  `UNSLOTH_DISABLE_FAST_GENERATION=1`, single 4-bit copy, no divergence possible) at the
+  cost of much slower rollouts (~3–5× longer epoch). Candidate: `grpo_08_1`, not written yet.
+- Qwen3.5 small series (March 2026: 0.8B/2B/4B/9B) evaluated and rejected for now:
+  Gated-DeltaNet + sparse-MoE hybrid, multimodal, requires transformers main — outside
+  what unsloth `FastLanguageModel` + vLLM LoRA hot-load support.
+- Upstream issue candidate (unsloth): "GRPO fast_inference + load_in_4bit silently never
+  trains on sharp-logit checkpoints (trainer and engine quantized independently)".
+
 ---
 
 ### 6. Other
@@ -344,7 +390,7 @@ All `*_test.py` files load a saved model (merged 16-bit) and evaluate it on the 
 | `grpo_05_qwen3_8b_gsm8k_test.py` | `outputs/lora-grpo-qwen3-8b` | `<think>` + `<answer>` |
 | `grpo_07_phi4_14b_gsm8k_test.py` | `outputs/lora-grpo-phi4` | `<reasoning>` + `<answer>` |
 | `grpo_07_phi4_14b_gsm8k_test.py` (reused) | `outputs/lora-grpo-phi4-mini-novllm` | `<reasoning>` + `<answer>` (grpo_07_1 no-vLLM/fa2 run) |
-| `grpo_08_qwen3_14b_gsm8k_test.py` | `outputs/lora-grpo-qwen3-14b` | `<think>` + `<answer>` |
+| `grpo_08_qwen3_4b_gsm8k_test.py` | `outputs/lora-grpo-qwen3-4b-2507-r16` | `<answer>` only (non-thinking Instruct-2507) |
 | `gsm8k_openai_1_test_500.py` | GPT-4o | baseline (API) |
 | `gsm8k_grokai_1_test_500.py` | Grok (xAI) | baseline (API) |
 
@@ -388,8 +434,8 @@ outputs/
   lora-grpo-phi4-outputs/          # training checkpoints
   lora-grpo-phi4-mini-novllm/          # merged 16-bit model (grpo_07_1, no-vLLM/fa2)
   lora-grpo-phi4-mini-novllm-outputs/  # training checkpoints
-  lora-grpo-qwen3-14b/
-  lora-grpo-qwen3-14b-outputs/
+  lora-grpo-qwen3-4b-2507-r16/     # (grpo_08 — blocked in 4-bit, see bug (a))
+  lora-grpo-qwen3-17b-r16/         # (grpo_10 — Qwen3-1.7B bf16)
   ...
   lora-bert-roberta2/              # lc_ fine-tuned models
   lora-modernbert-imdb/

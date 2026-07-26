@@ -1,5 +1,5 @@
 # --- Silence cosmetic third-party startup noise (must run before heavy imports) ---
-import os, warnings, logging, importlib.util
+import os, warnings, logging
 os.environ.setdefault("GLOG_minloglevel", "2")          # caffe2/glog: hide INFO+WARNING (GroupedMMUtils fallback, InitGoogleLogging)
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")  # drop vLLM INFO banner; keep warnings/errors
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -11,116 +11,82 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
 # ----------------------------------------------------------------------------------
 
-# ============================================================================
-# grpo_07_1 — flash_attn no-vLLM CONTROL, derived from grpo_07 (2026-07-24)
-# ============================================================================
-# Purpose: a clean training run that DELIBERATELY drops the colocated vLLM
-# rollout engine and generates rollouts through HF `model.generate()` with
-# `flash_attention_2`. This isolates bug (c)/(d) — the aliased-buffer LoRA
-# scaling in unsloth_zoo `load_lora_directly` that only exists on the vLLM
-# hot-load path. If this run stays healthy (|B|max grows off 0, KL bounded,
-# rollouts stay coherent) while the vLLM run (grpo_07) rots within ~5 steps,
-# the defect is confined to the vLLM colocation, not the optimizer/loss.
-#
-# Why a SEPARATE file (not just GRPO_NO_VLLM=1 on grpo_07): grpo_07's no-vLLM
-# branch falls back to `sdpa` because the flash_attn package was absent. That
-# changes the training-side attention kernel too, so a difference between the
-# runs could be "vLLM" OR "sdpa vs fa2". This file pins flash_attention_2 on
-# BOTH the (now-added) HF path, leaving vLLM colocation as the ONLY variable.
-#
-# PREREQUISITE — the flash_attn package:
-#   * Not shipped by default on this host (flex/sdpa stack). Build the pwr
-#     ebuild dev-python/flash-attn (template: /var/db/repos/stuff/dev-python/
-#     flash-attn/flash-attn-2.8.3_p1.ebuild) with Blackwell + low-RAM flags:
-#       CUDAARCHS="120"  (no dot; sm_120 SASS-only)
-#       MAKEOPTS="-j4"   (cicc OOMs ~7 GB each; use /etc/portage/env/lowmem-j4)
-#   * Until then this script auto-falls back to sdpa and prints a loud notice
-#     (the run is still a valid vLLM-vs-noVLLM control, just not fa2-matched).
-#
-# KNOWN SECOND BLOCKER (not fixed by flash_attn): unsloth's HF generation path
-# `unsloth_base_fast_generate` has a `multinomial` bug that can surface once
-# vLLM is off. If generation crashes there, that is the next patch to land —
-# see the unsloth-grpo-patching skill. Watch the first rollout closely.
-# ============================================================================
-
 import torch
 torch.backends.cuda.enable_flash_sdp(True)
 # GRPO_ANOMALY=1: autograd anomaly mode — pinpoints the backward op that creates the
-# NaN gradients found by GRAD-WATCH. ~3x slower; combine with GRPO_MAX_STEPS=1.
+# NaN gradients found by GRAD-WATCH (2026-07-24: non-finite grads in most micro-batches,
+# optimizer sees 128/128 NaN, lora_B stays zero -> every run so far was a no-op).
+# ~3x slower; combine with GRPO_MAX_STEPS=1. If the report only names a compiled-function
+# node, rerun with TORCHDYNAMO_DISABLE=1 as well — and if the NaN disappears in eager
+# mode, the bug lives in the compiled Triton kernels (triton/torch pin mismatch trail).
 if os.environ.get("GRPO_ANOMALY") == "1":
     torch.autograd.set_detect_anomaly(True)
     print("GRPO_ANOMALY=1: autograd anomaly detection ON", flush=True)
-# fa2 rollouts REQUIRE bypassing unsloth's generate wrapper (must be set BEFORE the
-# unsloth import — the wrapper is installed at patch time). unsloth_base_fast_generate
-# corrupts fa2 generation two ways: it forces cache_implementation="static" (fa2 cannot
-# mask the preallocated-but-empty slots -> attends over garbage), and even with
-# UNSLOTH_DISABLE_STATIC_GENERATION=1 a second wrapper defect still garbles output.
-# Plain HF generate with fa2 is verified clean (2026-07-25). sdpa keeps the wrapper
-# (its paged path is the validated-healthy baseline).
-if os.environ.get("GRPO_ATTN_IMPL") == "flash_attention_2":
-    os.environ["UNSLOTH_DISABLE_FAST_GENERATION"] = "1"
 from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
 import re
+import os
 from datasets import load_dataset, Dataset
 from tqdm import tqdm
 
+os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
+os.environ["VLLM_USE_V1"] = "0"
 os.environ["FLASH_ATTENTION_USE_FA2"] = "1"
 os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 
-# flash_attn gate — DEFAULT IS NOW sdpa (2026-07-25). With flash_attn installed,
-# unsloth's hybrid HF-generate path corrupts rollouts for compiled archs (Phi3 via
-# FastModel): prefill is split across unsloth's paged path and the transformers fa2
-# interface, and during decode the KV length never grows (each token overwrites the
-# same cache slot) -> token-loop gibberish from step 0 with LoRA B still zero.
-# Isolated 2026-07-25: fa2 kernel itself is numerically clean (synthetic GQA/causal
-# probes pass; pure-transformers fa2 generation clean); sdpa/eager on the SAME
-# unsloth-loaded model clean; only unsloth generate + fa2 interface breaks (kv
-# frozen at prompt length). Upstream unsloth bug, not the sm_120 build.
-# Opt back in with GRPO_ATTN_IMPL=flash_attention_2 once upstream is fixed.
-_have_flash_attn = importlib.util.find_spec("flash_attn") is not None
-attn_impl = os.environ.get("GRPO_ATTN_IMPL", "sdpa")
-if attn_impl == "flash_attention_2":
-    if not _have_flash_attn:
-        raise SystemExit("[grpo_07_1] GRPO_ATTN_IMPL=flash_attention_2 but flash_attn is not installed.")
-    assert os.environ.get("UNSLOTH_DISABLE_FAST_GENERATION") == "1", \
-        "fa2 requires the pre-import UNSLOTH_DISABLE_FAST_GENERATION=1 gate (see top of file)"
-    print("[grpo_07_1] fa2 rollouts: unsloth generate wrapper BYPASSED "
-          "(UNSLOTH_DISABLE_FAST_GENERATION=1) — plain HF generate, verified clean 2026-07-25.", flush=True)
-else:
-    print(f"[grpo_07_1] using attn_implementation='{attn_impl}' "
-          f"(flash_attn installed: {_have_flash_attn}; fa2 opt-in via GRPO_ATTN_IMPL).", flush=True)
-
-# Phi-4-mini (3.8B) in 4-bit: fits on 16 GB comfortably without a colocated vLLM
-# copy (no rollout engine here, so all VRAM goes to the training step).
+# Phi-4 (Microsoft, December 2024) — 14B model, excels at reasoning and math.
+# Beats Llama-3.1-8B and many larger models on MATH/GSM8K benchmarks.
+# In 4-bit: ~9GB VRAM. Reduced batch size and lora_rank vs 8B models.
+# lr=2e-6 — conservative for 14B to avoid destabilizing strong base performance.
+# 14B does NOT fit on 16 GB with colocated vLLM: ~9 GiB per copy x2 (training +
+# rollout engine) > VRAM. Even Qwen3-8B failed (see grpo_05). Use Phi-4-mini (3.8B).
 model_name = "microsoft/Phi-4-mini-instruct"
-model_path = "outputs/lora-grpo-phi4-mini-novllm"
+model_path = "outputs/lora-grpo-phi4-mini-bugcd"
 max_seq_length = 2048
 max_prompt_length = 512
-lora_rank = 16
+lora_rank = 16   # smaller rank: 14B already has high capacity, saves activations memory
+
+# GRPO_NO_VLLM=1: control probe (2026-07-24) — rollouts via HF generate instead of the
+# colocated vLLM engine. Discriminates bug (c): with real LoRA updates flowing, vLLM
+# generations corrupt progressively (coherent -> gibberish -> single-token loops within
+# ~5 steps) while the adapter itself stays tiny/finite. If everything stays healthy
+# without vLLM, the corruption lives in the colocation (shared VRAM pool / LoRA hot-load).
+_no_vllm = os.environ.get("GRPO_NO_VLLM") == "1"
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
     load_in_4bit=True,
-    attn_implementation=attn_impl,
+    # no-vLLM path runs HF attention directly; flash_attn package is absent on this
+    # host (flex/sdpa stack), so fall back to sdpa there.
+    attn_implementation=("sdpa" if _no_vllm else "flash_attention_2"),
     device_map="auto",
-    # No colocated rollout engine in this control: HF generate() does the rollouts.
-    fast_inference=False,
+    fast_inference=not _no_vllm,
+    gpu_memory_utilization=0.5,  # 16 GB shared with desktop; higher leaves too little for the training step
+    max_lora_rank=lora_rank,
 )
 
 model = FastLanguageModel.get_peft_model(
     model,
     r=lora_rank,
-    # Phi-4-mini fuses attention into qkv_proj and the MLP into gate_up_proj.
+    # Phi-4-mini fuses attention into qkv_proj and the MLP into gate_up_proj; the
+    # unfused Llama-style names match nothing, so the old list put LoRA only on
+    # o_proj + down_proj. Fused-module LoRA in vLLM needs the pwr patches
+    # (fused-packed-module wrap + no-stacked-name-mapping) — verify they are live.
     target_modules=["qkv_proj", "o_proj", "gate_up_proj", "down_proj"],
-    # alpha == rank (s=1). Kept identical to grpo_07 so the control differs from
-    # the vLLM run ONLY in the rollout engine. NB: bug (c)'s in-place s-scaling
-    # lives on the vLLM hot-load path, so it cannot fire here regardless of s —
-    # but we keep s=1 to hold every other variable constant.
-    lora_alpha=lora_rank,
-    # GRPO_GC: hf (default, clean grads) | unsloth (proven NaN no-op) | off (VRAM-heavy).
+    # VALIDATION SMOKE for the de-alias patch (2026-07-26): alpha = 2*rank (s=2)
+    # was the fatal configuration of bug (c) — the aliased hot-load compounded
+    # s onto the training lora_B 8x/step (|B|max x256/step, rollouts rotted by
+    # step ~4). With load_lora() shipping clones this must now stay healthy:
+    # |B|max ~1e-5 and monotone, GRAD-WATCH tripwire (|B|max>1.0) must not fire.
+    lora_alpha=2 * lora_rank,
+    # GRPO_GC selects the gradient-checkpointing implementation (A/B probes 2026-07-24):
+    #   hf (default) — plain torch/HF per-layer checkpointing; clean grads confirmed
+    #     (grad_norm=0.063, GRAD-WATCH non-finite=0, compiled mode);
+    #   unsloth — unsloth-zoo offloading GC; PROVEN to produce NaN gradients in most
+    #     micro-batches -> optimizer gets NaN -> zero updates (no-op training);
+    #   off — disabled entirely (clean grads confirmed; VRAM-heavy, probes only).
     use_gradient_checkpointing={"unsloth": "unsloth", "hf": True, "off": False}[
         os.environ.get("GRPO_GC", "hf")],
     random_state=3407,
@@ -139,7 +105,7 @@ def extract_hash_answer(text: str) -> str:
             return str(-value if whole.startswith('-') else value)
         # Strip currency symbols and whitespace (joins space-grouped thousands like "10 000"),
         # then drop comma thousands separators
-        norm = re.sub(r'[$€£\s]', '', content).replace(',', '')
+        norm = re.sub(r'[$\u20ac\u00a3\s]', '', content).replace(',', '')
         if re.fullmatch(r'-?\d+(\.\d+)?', norm):
             return norm
     if "####" in text:
@@ -227,8 +193,8 @@ def starts_with_reasoning_tag(completions, **kwargs):
     return [1.0 if c[0]["content"].strip().startswith("<reasoning>") else 0.0 for c in completions]
 
 training_args = GRPOConfig(
-    use_vllm=False,       # control: rollouts via HF generate(), no colocated vLLM engine
-    learning_rate=4e-6,   # kept == grpo_07 (alpha=rank workaround doubled lr from 2e-6)
+    use_vllm=not _no_vllm,
+    learning_rate=4e-6,   # 2e-6 doubled to offset LoRA scale s: 2 -> 1 (alpha=rank workaround)
     adam_beta1=0.9,
     adam_beta2=0.99,
     weight_decay=0.1,
@@ -238,19 +204,22 @@ training_args = GRPOConfig(
     logging_steps=1,
     bf16=is_bfloat16_supported(),
     fp16=not is_bfloat16_supported(),
-    per_device_train_batch_size=2,
+    per_device_train_batch_size=2,   # 14B needs more VRAM per sample
     gradient_accumulation_steps=8,
-    num_generations=2,
-    # Keep the logp forward chunked per sequence (grpo_03 OOM lesson): the logp
-    # forward still scores the whole generation batch even without vLLM.
+    num_generations=2,               # reduce for 14B memory budget
+    # 16 GB: TRL scores the whole generation batch (batch x steps_per_generation)
+    # in one logp forward -> OOM in matmul_lora (grpo_03 lesson, 2026-07-20).
+    # Cap at num_generations and chunk the logp forward per sequence.
     generation_batch_size=2,
     unsloth_grpo_mini_batch=1,
     unsloth_logit_chunk_multiplier=16,
-    # TRL 1.8 removed max_prompt_length from GRPOConfig. No vLLM here, so
-    # vllm_max_model_length is irrelevant; only the completion budget matters.
+    # TRL 1.8 removed max_prompt_length from GRPOConfig; prompts are no longer
+    # truncated by the config. vllm_max_model_length sets the vLLM context window
+    # (>= max prompt length in the dataset + max_completion_length).
     max_completion_length=max_seq_length - max_prompt_length,
+    vllm_max_model_length=max_seq_length,
     num_train_epochs=1,
-    # GRPO_MAX_STEPS=N caps the run for diagnostics (smoke); -1 = full epoch.
+    # GRPO_MAX_STEPS=N caps the run for diagnostics (anomaly probe); -1 = full epoch.
     max_steps=int(os.environ.get("GRPO_MAX_STEPS", "-1")),
     save_strategy="steps",
     save_steps=50,
@@ -274,15 +243,22 @@ trainer = GRPOTrainer(
     train_dataset=dataset,
 )
 
-# --- GRAD-WATCH (2026-07-24): per-tensor backward hooks on 8 lora_B params + an
-# optimizer step pre-hook. Reports, per step: grads seen / None / non-finite /
-# nonzero, frozen-base checksum drift, and |A|max / |B|max. Read the smoke log:
-#   |B|max growing off 0, non-finite=0, nonzero>0  -> training (healthy control);
-#   |B|max=0.0, non-finite=<all> every step        -> real no-op;
-#   base-drift non-empty                            -> a write into frozen weights.
+# --- GRAD-WATCH (2026-07-24): grpo_06 checkpoint-50 proved the optimizer receives
+# exactly-zero gradients every step (lora_B all zero, Adam moments absmax=0) while
+# grad_norm logs nan. This probe pins down WHERE the gradient dies:
+#   * per-tensor backward hooks fire during loss.backward() itself — if their call
+#     count stays 0, the autograd graph never reaches the LoRA params (detached graph);
+#     if they fire with zeros, backward computes zero contributions;
+#     if they fire with non-finite values, real NaN grads get zeroed later;
+#   * a global optimizer step pre-hook reports what the optimizer actually sees.
+# Trainer-agnostic on purpose: works regardless of unsloth's exec'd inner loop.
 _watch_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
 _bwd_stats = {"calls": 0, "nonzero": 0, "nonfinite": 0}
 
+# Integrity probes (bug (c), 2026-07-24): frozen base weights must NEVER change during
+# training; the LoRA magnitudes must stay tiny (~lr x steps). If a base checksum drifts
+# -> something writes into frozen weight memory (OOB write). If |B|max explodes ->
+# the optimizer path is at fault after all.
 _frozen_pool = [(n, p) for n, p in model.named_parameters()
                 if not p.requires_grad and p.numel() > 1_000_000]
 _frozen_probes = [_frozen_pool[i] for i in
@@ -337,14 +313,14 @@ def _grad_watch(optimizer, *args, **kwargs):
     drifted = [n.split("model.layers.")[-1][:30] for n, p in _frozen_probes
                if _checksum(p) != _frozen_base[n]]
     a_max, b_max = _adapter_mags()
-    # Tripwire: with no vLLM the aliased in-place s-scaling cannot fire, so |B|
-    # must stay ~lr x steps. A blow-up here would mean the defect is NOT confined
-    # to vLLM after all — a stronger finding than the vLLM run's tripwire.
+    # Tripwire for bug (c): with alpha=rank the in-place s-scaling is a no-op and |B|
+    # stays ~lr x steps. Anything near 1.0 means the aliased-buffer scaling is back
+    # (e.g. someone raised alpha again) — abort instead of wasting a rotten run.
     if b_max > 1.0:
         raise RuntimeError(
             f"[GRAD-WATCH] |B|max={b_max:.3e} exploded at optimizer step {_gw_step['n']} "
-            "WITHOUT vLLM — bug (c) is NOT confined to the vLLM hot-load path; "
-            "re-open the optimizer/loss hypothesis.")
+            "— bug (c) aliased-buffer LoRA scaling regression; check lora_alpha == lora_rank "
+            "and unsloth_zoo vllm_utils.load_lora_directly.")
     print(f"[GRAD-WATCH step {_gw_step['n']}] optimizer sees: {present} grads "
           f"({absent} None), nonzero={nonzero}, non-finite={nonfinite}, absmax={absmax:.3e} | "
           f"backward hooks (8x lora_B): calls={_bwd_stats['calls']}, "
@@ -367,24 +343,33 @@ def check_lengths(dataset, tokenizer, max_prompt_length, max_seq_length):
 
 check_lengths(dataset, tokenizer, max_prompt_length, max_seq_length)
 
-# The recompile-limit override is needed even without vLLM: unsloth's fullgraph
-# compiled forwards recompile across varying shapes, and the autograd engine
-# recomputing checkpointed forwards during backward reads the DEFAULT (8) from a
-# ContextVar. Raise both the live value and the cross-thread default.
+# vLLM engine init (attention backend selector) permanently lowers
+# torch._dynamo.config.recompile_limit to 16, clobbering unsloth's 1024.
+# Worse: config writes land in a ContextVar, so other threads (autograd
+# engine recomputing checkpointed forwards during backward) fall back to
+# the DEFAULT of 8 -> FailOnRecompileLimitHit on unsloth's fullgraph=True
+# compiled RMSNorm. Restore the main-thread override AND raise the default
+# so every thread sees 1024.
 import torch._dynamo
 torch._dynamo.config.recompile_limit = 1024
 torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train()
 
-# bug (d), 2026-07-24: unsloth's in-process save_pretrained_merged corrupted
-# o_proj/down_proj (~1e13, vLLM-pool aliasing). No vLLM in this script, but the
-# offline CPU merge path is the only validated one — use it uniformly. Save only
-# the adapter, then merge in a clean CPU-only subprocess from disk.
-# Manual re-run: python grpo_merge.py outputs/lora-grpo-phi4-mini-novllm adapter-final
+# --- bug (d) VALIDATION TAIL (2026-07-26) ---------------------------------
+# Deliberately exercise the previously-forbidden operation: in-process
+# save_pretrained_merged WITH the vLLM engine alive. With the unsloth-zoo
+# de-alias + CPU-snapshot patch this must produce a clean model; the offline
+# CPU-only grpo_merge.py output from the same adapter is the oracle.
 final_adapter = os.path.join(f"{model_path}-outputs", "adapter-final")
 model.save_pretrained(final_adapter)
 tokenizer.save_pretrained(final_adapter)
+
+inprocess_dir = f"{model_path}-inprocess"
+print(f"[BUGD-VALIDATE] in-process merged_16bit -> {inprocess_dir} (vLLM alive)", flush=True)
+model.save_pretrained_merged(inprocess_dir, tokenizer, save_method="merged_16bit")
+
+# Oracle: offline CPU merge from the identical adapter (CUDA hidden inside).
 import subprocess, sys
 subprocess.run(
     [sys.executable,
@@ -392,3 +377,32 @@ subprocess.run(
      model_path, "adapter-final", "--base", model_name],
     check=True,
 )
+
+# Compare: every shared tensor must match the oracle closely; the bug (d)
+# signature was FINITE garbage ~1e13 on o_proj/down_proj, so a small
+# tolerance discriminates unambiguously.
+import glob as _glob
+from safetensors import safe_open as _safe_open
+
+def _load_all(d):
+    out = {}
+    for f in sorted(_glob.glob(os.path.join(d, "*.safetensors"))):
+        with _safe_open(f, framework="pt") as sf:
+            for k in sf.keys():
+                out[k] = sf.get_tensor(k)
+    return out
+
+_a, _b = _load_all(inprocess_dir), _load_all(model_path)
+_common = sorted(set(_a) & set(_b))
+print(f"[BUGD-VALIDATE] tensors: inprocess={len(_a)} oracle={len(_b)} common={len(_common)}", flush=True)
+_worst, _bad = 0.0, []
+for _k in _common:
+    _d = (_a[_k].float() - _b[_k].float()).abs().max().item()
+    _m = _a[_k].float().abs().max().item()
+    _worst = max(_worst, _d)
+    if _d > 0.05 or _m > 1e4:
+        _bad.append((_k, _d, _m))
+for _k, _d, _m in _bad[:20]:
+    print(f"[BUGD-VALIDATE] BAD {_k}: maxdiff={_d:.3e} absmax={_m:.3e}", flush=True)
+print(f"[BUGD-VALIDATE] worst maxdiff vs oracle = {_worst:.3e}", flush=True)
+print(f"[BUGD-VALIDATE] {'PASS' if (not _bad and len(_common) > 0 and len(_a) == len(_b)) else 'FAIL'}", flush=True)

@@ -9,7 +9,7 @@ import os
 os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
 seed = 43
 
-model_path = "outputs/lora-grpo-qwen3-4b-r16"  # must match grpo_08_qwen3_4b_gsm8k.py / grpo_08_merge.py
+model_path = "outputs/lora-grpo-qwen3-4b-2507-r16"  # must match grpo_08_qwen3_4b_gsm8k.py (merged via grpo_merge.py)
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -30,8 +30,9 @@ def generate_answer(question, model, tokenizer):
             "You are a helpful math assistant. "
             "Think through the problem carefully, then give the final numerical answer in <answer>...</answer> tags."
         )},
+        # Instruct-2507 is non-thinking: no /think flag, no <think> blocks.
         {'role': 'user', 'content': (
-            f"/think\n\nSolve this problem step by step. "
+            f"Solve this problem step by step. "
             f"End your response with <answer>NUMBER</answer>.\n\nProblem:\n{question}"
         )},
     ], tokenize=False, add_generation_prompt=True)

@@ -33,7 +33,14 @@ lora_rank = 64
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
-    load_in_4bit=True,  # Set to False for full precision
+    # bf16, NOT 4-bit: bug (a) root cause (probe 2026-07-26, grpo_02_buga_bf16_smoke.py)
+    # — the trainer copy and the colocated vLLM engine copy are quantized to bnb-4bit
+    # INDEPENDENTLY and disagree numerically; on sharp-logit checkpoints (Qwen family,
+    # R1-distill) the per-token logp gap explodes (clip_ratio ~6%, loss ~15-20, KL ~1e6
+    # at step 1 with B=0) and exp() of it poisons every LoRA-B grad (non-finite from
+    # step 1, |B| stays 0 — the run silently never trains). In bf16 both sides share
+    # one numerical identity: grads finite, KL ~1e-4. 1.5B bf16 fits 16 GB (~3 GB x2).
+    load_in_4bit=False,
     fast_inference=True,
     max_lora_rank=lora_rank,
     gpu_memory_utilization=0.5,  # 0.8 left too little VRAM for the colocated training step (OOM at step 12 on 16 GB)
@@ -230,5 +237,19 @@ torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train()
 
-# Save final model
-model.save_pretrained_merged(model_path, tokenizer, save_method="merged_16bit")
+# bug (d), 2026-07-24: unsloth's in-process save_pretrained_merged reads base
+# weights through memory aliased with the live vLLM pool -> o_proj/down_proj
+# garbage (~1e13). Save only the adapter (small LoRA tensors, safe to read),
+# then merge in a clean CPU-only subprocess that loads base + adapter from
+# disk and cannot alias the engine.
+# Manual re-run: python grpo_merge.py outputs/lora-grpo-qwen3 adapter-final --base Qwen/Qwen2.5-1.5B-Instruct
+final_adapter = os.path.join(f"{model_path}-outputs", "adapter-final")
+model.save_pretrained(final_adapter)
+tokenizer.save_pretrained(final_adapter)
+import subprocess, sys
+subprocess.run(
+    [sys.executable,
+     os.path.join(os.path.dirname(os.path.abspath(__file__)), "grpo_merge.py"),
+     model_path, "adapter-final", "--base", model_name],
+    check=True,
+)

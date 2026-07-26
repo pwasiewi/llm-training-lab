@@ -75,10 +75,12 @@ model = FastLanguageModel.get_peft_model(
     # o_proj + down_proj. Fused-module LoRA in vLLM needs the pwr patches
     # (fused-packed-module wrap + no-stacked-name-mapping) — verify they are live.
     target_modules=["qkv_proj", "o_proj", "gate_up_proj", "down_proj"],
-    # alpha MUST equal rank (s=1): unsloth_zoo load_lora_directly applies s=alpha/r
-    # IN-PLACE on an aliased vLLM buffer 8x per step, so any s>1 compounds —
-    # s=2 grew |B|max x256/step and rotted rollouts into gibberish (bug (c),
-    # integrity probe 2026-07-24). Until the temp-buffer patch lands, s must be 1.
+    # bug (c) FIXED 2026-07-26 (pwr unsloth-zoo dealias-merge-guard patch:
+    # load_lora ships clones, so vLLM's in-place `lora_b *= s` no longer hits
+    # the training weights) — alpha != rank is legal again (validated: alpha=2r
+    # smoke 5/5 clean, grpo_07_bugcd_smoke.py). Keeping alpha=rank here because
+    # learning_rate below is already doubled to compensate s: 2 -> 1; changing
+    # both back is a no-op.
     lora_alpha=lora_rank,
     # GRPO_GC selects the gradient-checkpointing implementation (A/B probes 2026-07-24):
     #   hf (default) — plain torch/HF per-layer checkpointing; clean grads confirmed
@@ -318,8 +320,9 @@ def _grad_watch(optimizer, *args, **kwargs):
     if b_max > 1.0:
         raise RuntimeError(
             f"[GRAD-WATCH] |B|max={b_max:.3e} exploded at optimizer step {_gw_step['n']} "
-            "— bug (c) aliased-buffer LoRA scaling regression; check lora_alpha == lora_rank "
-            "and unsloth_zoo vllm_utils.load_lora_directly.")
+            "— bug (c) aliased-buffer LoRA scaling regression; verify the unsloth-zoo "
+            "dealias patch is live (grep 'v.detach().clone()' in vllm_utils.load_lora — "
+            "an emerge may have reverted it).")
     print(f"[GRAD-WATCH step {_gw_step['n']}] optimizer sees: {present} grads "
           f"({absent} None), nonzero={nonzero}, non-finite={nonfinite}, absmax={absmax:.3e} | "
           f"backward hooks (8x lora_B): calls={_bwd_stats['calls']}, "
@@ -354,4 +357,20 @@ torch._dynamo.config.recompile_limit = 1024
 torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train()
-model.save_pretrained_merged(model_path, tokenizer, save_method="merged_16bit")
+
+# bug (d) FIXED 2026-07-26 (unsloth-zoo patch: create_lora_statistics snapshots
+# LoRA factors to CPU at capture + magnitude tripwire in _merge_lora); in-process
+# save_pretrained_merged with a live vLLM engine validated clean vs the CPU
+# oracle (194/194 tensors, maxdiff 1.5e-08). The offline subprocess merge stays
+# as the production path anyway — it is validated, parallel-safe and engine-free.
+# Manual re-run: python grpo_merge.py outputs/lora-grpo-phi4-mini adapter-final
+final_adapter = os.path.join(f"{model_path}-outputs", "adapter-final")
+model.save_pretrained(final_adapter)
+tokenizer.save_pretrained(final_adapter)
+import subprocess, sys
+subprocess.run(
+    [sys.executable,
+     os.path.join(os.path.dirname(os.path.abspath(__file__)), "grpo_merge.py"),
+     model_path, "adapter-final", "--base", model_name],
+    check=True,
+)

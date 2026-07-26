@@ -253,4 +253,20 @@ torch._dynamo.config.recompile_limit = 1024
 torch._dynamo.config._config["recompile_limit"].default = 1024
 
 trainer.train(resume_from_checkpoint=checkpoint_path)
-model.save_pretrained_merged(model_path, tokenizer, save_method="merged_16bit")
+
+# bug (d), 2026-07-24: unsloth's in-process save_pretrained_merged reads base
+# weights through memory aliased with the live vLLM pool -> o_proj/down_proj
+# garbage (~1e13). Save only the adapter (small LoRA tensors, safe to read),
+# then merge in a clean CPU-only subprocess that loads base + adapter from
+# disk and cannot alias the engine.
+# Manual re-run: python grpo_merge.py outputs/lora-grpo-phi4-mini adapter-final --base microsoft/Phi-4-mini-instruct
+final_adapter = os.path.join(f"{model_path}-outputs", "adapter-final")
+model.save_pretrained(final_adapter)
+tokenizer.save_pretrained(final_adapter)
+import subprocess, sys
+subprocess.run(
+    [sys.executable,
+     os.path.join(os.path.dirname(os.path.abspath(__file__)), "grpo_merge.py"),
+     model_path, "adapter-final", "--base", model_name],
+    check=True,
+)
