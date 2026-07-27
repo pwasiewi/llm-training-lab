@@ -1,3 +1,8 @@
+import logging
+# torchao 0.18 still calls the deprecated register_constant() on its Enums at
+# import time; silence the resulting torch.utils._pytree warnings (emitted via
+# logging, so a warnings filter would not catch them).
+logging.getLogger("torch.utils._pytree").setLevel(logging.ERROR)
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments, EarlyStoppingCallback
 from transformers import BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -6,6 +11,7 @@ import datasets
 import torch
 import os
 os.environ["WANDB_DISABLED"] = "true"
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # avoid fragmentation OOM near the 16 GB limit
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 os.environ.setdefault("TENSORBOARD_LOGGING_DIR", "outputs/logs")
 # Check GPU availability
@@ -23,15 +29,22 @@ bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,  # Enable 4-bit quantization
     bnb_4bit_quant_type="nf4",
     bnb_4bit_use_double_quant=True,
-    bnb_4bit_compute_dtype=torch.float16
+    bnb_4bit_compute_dtype=torch.bfloat16  # Gemma is trained in bf16; fp16 compute can overflow
 )
 
 model = AutoModelForSequenceClassification.from_pretrained(
     model_name,
     num_labels=2,
     quantization_config=bnb_config,
-    device_map="auto"
-).to(device)
+    device_map="auto"  # already places the model on GPU; .to(device) on a 4-bit model is redundant
+)
+# Classification needs no KV cache; a returned DynamicCache breaks Trainer eval gathering.
+# Gemma-3 nests the text config, so disable the cache at both levels and tell the
+# Trainer to drop past_key_values from eval outputs.
+model.config.use_cache = False
+if hasattr(model.config, "text_config"):
+    model.config.text_config.use_cache = False
+model.config.keys_to_ignore_at_inference = ["past_key_values"]
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
 # Configure LoRA
@@ -71,10 +84,10 @@ test_dataset = test_data.map(preprocess_function, batched=True)
 training_args = TrainingArguments(
     output_dir=model_path,
     report_to=[],  # Disable W&B logging
-    per_device_train_batch_size=2,  # Smaller batch size for 8GB VRAM
-    per_device_eval_batch_size=4,
-    gradient_accumulation_steps=8,  # Compensate for smaller batch size
-    fp16=True,  # Mixed precision to save memory
+    per_device_train_batch_size=8,  # bs=16 peaks ~13.4 GiB and evals OOM — 8 leaves headroom for the desktop
+    per_device_eval_batch_size=16,
+    gradient_accumulation_steps=2,  # keep effective batch at 16 (was 2*8)
+    bf16=True,  # Mixed precision to save memory (bf16: Gemma numerics, no GradScaler)
     num_train_epochs=3,
     weight_decay=0.01,
     eval_strategy="epoch",
@@ -83,7 +96,8 @@ training_args = TrainingArguments(
     learning_rate=1e-4,
     load_best_model_at_end=True,
     save_total_limit=2,  # Limit checkpoints to save disk space
-    dataloader_num_workers=0  # Avoid multiprocessing re-importing this script.
+    dataloader_num_workers=0,  # Avoid multiprocessing re-importing this script.
+    label_names=["labels"]  # Silence Trainer warning for PEFT-wrapped models
 )
 
 def compute_metrics(pred):

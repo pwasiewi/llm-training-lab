@@ -1,3 +1,8 @@
+import logging
+# torchao 0.18 still calls the deprecated register_constant() on its Enums at
+# import time; silence the resulting torch.utils._pytree warnings (emitted via
+# logging, so a warnings filter would not catch them).
+logging.getLogger("torch.utils._pytree").setLevel(logging.ERROR)
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments, EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
@@ -35,10 +40,10 @@ lora_config = LoraConfig(
     task_type="SEQ_CLS"
 )
 
-# Prepare model for int8 training to save memory
+# Freeze base weights; gradient checkpointing OFF — 335M-param model, activations are cheap
 model = prepare_model_for_kbit_training(
     model,
-    gradient_checkpointing_kwargs={"use_reentrant": False},
+    use_gradient_checkpointing=False,
 )
 lora_model = get_peft_model(model, lora_config)
 
@@ -60,9 +65,9 @@ test_dataset = test_data.map(preprocess_function, batched=True)
 training_args = TrainingArguments(
     output_dir=model_path,
     report_to=[],  # Disable W&B logging
-    per_device_train_batch_size=16,  # Smaller batch size for 8GB VRAM
-    per_device_eval_batch_size=16,
-    gradient_accumulation_steps=2,  # Compensate for smaller batch size
+    per_device_train_batch_size=32,  # 335M model at seq 128 — fits easily
+    per_device_eval_batch_size=128,  # eval stores no activations for backward
+    gradient_accumulation_steps=1,  # keep effective batch at 32 (was 16*2)
     fp16=True,  # Mixed precision to save memory
     num_train_epochs=30,
     weight_decay=0.01,
@@ -72,7 +77,8 @@ training_args = TrainingArguments(
     learning_rate=3e-4,
     load_best_model_at_end=True,
     save_total_limit=2,  # Limit checkpoints to save disk space
-    dataloader_num_workers=0  # Avoid multiprocessing re-importing this script.
+    dataloader_num_workers=0,  # Avoid multiprocessing re-importing this script.
+    label_names=["labels"]  # Silence Trainer warning for PEFT-wrapped models
 )
 
 def compute_metrics(pred):

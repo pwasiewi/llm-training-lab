@@ -1,3 +1,8 @@
+import logging
+# torchao 0.18 still calls the deprecated register_constant() on its Enums at
+# import time; silence the resulting torch.utils._pytree warnings (emitted via
+# logging, so a warnings filter would not catch them).
+logging.getLogger("torch.utils._pytree").setLevel(logging.ERROR)
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from peft import PeftModel
 from sklearn.metrics import accuracy_score, classification_report
@@ -16,7 +21,7 @@ base_model_name = "answerdotai/ModernBERT-large"
 base_model = AutoModelForSequenceClassification.from_pretrained(
     base_model_name,
     num_labels=2,
-    torch_dtype=torch.float16,
+    dtype=torch.bfloat16,  # `torch_dtype` deprecated; bf16 matches training
 ).to(device)
 
 model = PeftModel.from_pretrained(base_model, model_path)

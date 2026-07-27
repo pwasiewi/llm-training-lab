@@ -1,3 +1,8 @@
+import logging
+# torchao 0.18 still calls the deprecated register_constant() on its Enums at
+# import time; silence the resulting torch.utils._pytree warnings (emitted via
+# logging, so a warnings filter would not catch them).
+logging.getLogger("torch.utils._pytree").setLevel(logging.ERROR)
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments, EarlyStoppingCallback
 from peft import LoraConfig, get_peft_model
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
@@ -24,7 +29,7 @@ model_name = "answerdotai/ModernBERT-large"
 model = AutoModelForSequenceClassification.from_pretrained(
     model_name,
     num_labels=2,
-    torch_dtype=torch.float16,
+    dtype=torch.bfloat16,  # `torch_dtype` deprecated in transformers v5; bf16 avoids GradScaler issues with half-precision trainable params
     attn_implementation="flash_attention_2",
 ).to(device)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -56,10 +61,10 @@ test_dataset = test_data.map(preprocess_function, batched=True)
 training_args = TrainingArguments(
     output_dir=model_path,
     report_to=[],
-    per_device_train_batch_size=16,
-    per_device_eval_batch_size=16,
-    gradient_accumulation_steps=2,
-    fp16=True,
+    per_device_train_batch_size=16,  # bs=32 at seq 512 OOMs on 16 GB (needs >15 GiB); 16 is the ceiling
+    per_device_eval_batch_size=64,  # eval stores no activations for backward
+    gradient_accumulation_steps=2,  # effective batch 32
+    bf16=True,  # matches the bf16 model dtype; fp16 GradScaler cannot unscale half-precision trainable params
     num_train_epochs=10,
     weight_decay=0.01,
     eval_strategy="epoch",
@@ -69,6 +74,7 @@ training_args = TrainingArguments(
     load_best_model_at_end=True,
     save_total_limit=2,
     dataloader_num_workers=0,
+    label_names=["labels"],  # Silence Trainer warning for PEFT-wrapped models
 )
 
 def compute_metrics(pred):

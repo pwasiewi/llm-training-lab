@@ -80,9 +80,73 @@ Goal: IMDB sentiment classification via fine-tuning pre-trained models with LoRA
 | `lc_08_gemma9b_imdb.py` | gemma-2-9b-it | 9B | 3 | 1e-4 |
 | `lc_09_gemma12b_imdb.py` ★ | gemma-3-12b-pt | 12B | 3 | 1e-4 |
 
-> **Ranking:** `ModernBERT-large` ≥ `roberta-large` ≈ `electra-large` > `gemma3-12b` > `gemma2-9b` > `gemma2-2b` > `distilbert`
+> **Ranking (measured 2026-07-27, full 25k test set):** `ModernBERT-large` (96.2%) > `gemma3-12b` ≈ `gemma2-9b` (94.6%) > `gemma2-2b` (93.5%) > `roberta-large` (92.7%) > `distilbert` (87.1%) ≫ `electra-large` (training diverged, 50%)
 >
 > ModernBERT (Dec 2024): rotary embeddings, Flash Attention 2, 8192-token context, ~24% faster than RoBERTa.
+
+#### VRAM tuning (2026-07-27, RTX 5070 Ti 16 GB, transformers 5.12 / torch 2.14)
+
+Batch sizes probed empirically (4 train steps + full eval step per script); effective
+batch (train bs × accumulation) kept identical to the original configs, so training
+dynamics and lr stay comparable — only GPU utilization changes. Throughput measured on
+the same 4-step smoke (includes warmup, so real epochs run slightly faster).
+
+| Script | train/eval bs | accum | effective bs | grad ckpt | peak VRAM | train samples/s |
+|---|---|---|---|---|---|---|
+| `lc_03` distilbert | 128 / 256 | 1 | 128 | off | 5.3 GiB | ~342 |
+| `lc_04` electra-large | 32 / 128 | 1 | 32 | off | 6.0 GiB | ~167 |
+| `lc_05` roberta-large | 32 / 128 | 1 | 32 | off | 5.8 GiB | ~129 |
+| `lc_06` modernbert (seq 512) | 16 / 64 | 2 | 32 | off | 12.6 GiB | ~33 |
+| `lc_07` gemma-2-2b nf4 | 16 / 32 | 2 | 32 | off | 13.5 GiB | ~33 |
+| `lc_08` gemma-2-9b nf4 | 32 / 64 | 4 | 128 | on | 12.5 GiB | ~8.1 |
+| `lc_09` gemma-3-12b nf4 | 8 / 16 | 2 | 16 | on | 11.9 GiB | ~6.0 |
+
+Notes:
+- Batch scales with **activation memory**, not model size: small models with grad
+  checkpointing OFF store the full backward graph (lc_07: 2B weights ≈ 2.5 GB but
+  ~10 GB activations at bs=16), while the 9B/12B keep checkpointing ON and afford a
+  wider batch (only layer inputs stored, rest recomputed).
+- OOM ceilings found: lc_06 at bs=32/seq 512 (>15 GiB), lc_07 at bs=32 with ckpt off,
+  lc_09 at train bs=16 (evals OOM at ~13.4 GiB train peak). lc_09 additionally sets
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` against fragmentation near the limit.
+- Eval batch can always be wider than train batch: forward-only passes free activations
+  layer by layer.
+- Critical fix (all gemma scripts): `use_cache=False` (both config levels on gemma-3) +
+  `keys_to_ignore_at_inference=["past_key_values"]` — otherwise Trainer eval crashes with
+  `TypeError: Unsupported types (DynamicCache)` at the first epoch boundary under
+  transformers 5.
+
+#### Final results (2026-07-27 overnight run, tuned configs above)
+
+Training times deduced from checkpoint timestamps (runs were sequential; each epoch
+includes a full 25k-example eval). Test accuracy = the saved adapter re-loaded by
+`lc_NN_*_test.py` and evaluated on the full 25k test set — matching the Trainer's
+best-epoch eval confirms the saved artifact is intact. Untrained baseline (pretrained
+backbone + freshly initialized head) is chance level ≈ 50% for every model.
+
+| Script | Model | Epochs run | Time/epoch | Total wall | Best eval acc | Test acc (saved) |
+|---|---|---|---|---|---|---|
+| `lc_03` | distilbert-base | 8 (best ep3) | ~40 s | ~7 min | — (eval_loss 0.398) | 87.14% |
+| `lc_04` | electra-large | 6 | 129 s | 13 min | 50.0% | **50.00% — failed** |
+| `lc_05` | roberta-large | 4 (best ep2) | 120 s | 8 min | 92.84% | 92.72% |
+| `lc_06` | ModernBERT-large | 4 (best ep2) | 13.8 min | 55 min | 96.24% | 96.16% |
+| `lc_07` | gemma-2-2b nf4 | 4 (best ep2) | 13.8 min | 55 min | 93.50% | 93.50% |
+| `lc_08` | gemma-2-9b nf4 | 3 (best ep1) | 65.5 min | 3 h 17 min | 94.56% | 94.55% |
+| `lc_09` | gemma-3-12b nf4 | 3 (best ep2) | 82 min | 4 h 08 min | 94.60% | 94.60% |
+
+Notes:
+- **lc_04 (electra-large) diverged**: eval_loss pinned at ln 2 = 0.693 and accuracy at
+  exactly 0.5 for all 6 epochs — the classic electra-large instability at lr 3e-4.
+  Retry with lr ≈ 5e-5–1e-4 (and optionally warmup); not a loader or eval artifact.
+- **Test-file loader bug fixed (2026-07-27)**: the old `lc_*_test.py` loaded the adapter
+  directory directly via `AutoModelForSequenceClassification.from_pretrained(adapter_dir)`,
+  which silently instantiates a **randomly initialized classification head** (measured:
+  0.46–0.63 accuracy on models the Trainer scored at 92–93%). All test files now load the
+  base model explicitly and apply the adapter via `PeftModel.from_pretrained`, with batched
+  inference on the full 25k test set (previously 500 examples one-by-one).
+- Compute-for-accuracy is brutal at the top: ModernBERT-large gets the best accuracy at
+  55 min total, while gemma-3-12b burns 4 h for −1.6 pp. The 9B→12B step gains nothing
+  (94.55% vs 94.60%); IMDB@128 tokens saturates around ~94.6% for decoder LoRA.
 
 ---
 
@@ -421,6 +485,12 @@ python lc_06_modernbert_imdb_test.py  # new SOTA (Dec 2024)
 ```
 
 IMDB files print a full `classification_report` (precision/recall/F1 per class) and final accuracy.
+
+All IMDB test files (rewritten 2026-07-27) load the base model explicitly and apply the
+adapter via `PeftModel.from_pretrained`, then run batched inference over the **full 25k
+test set**. Do not load the adapter directory directly with `AutoModelForSequenceClassification`
+— it silently attaches a randomly initialized classification head (see "Final results"
+notes in section 4). Results: section 4, "Final results (2026-07-27)".
 
 ---
 

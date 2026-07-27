@@ -1,3 +1,8 @@
+import logging
+# torchao 0.18 still calls the deprecated register_constant() on its Enums at
+# import time; silence the resulting torch.utils._pytree warnings (emitted via
+# logging, so a warnings filter would not catch them).
+logging.getLogger("torch.utils._pytree").setLevel(logging.ERROR)
 import optuna
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments, \
     EarlyStoppingCallback
@@ -83,7 +88,8 @@ def objective(trial):
         learning_rate=1e-4,
         load_best_model_at_end=True,
         save_total_limit=1,
-        dataloader_num_workers=0
+        dataloader_num_workers=0,
+        label_names=["labels"]  # Silence Trainer warning for PEFT-wrapped models
     )
 
     trainer = Trainer(
@@ -91,7 +97,7 @@ def objective(trial):
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,  # `tokenizer=` was removed in transformers v5
         callbacks=[EarlyStoppingCallback(early_stopping_patience=5)]
     )
 
