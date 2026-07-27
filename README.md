@@ -1,6 +1,6 @@
 # LLM Experiments
 
-Experiments with training and fine-tuning LLM models. GPU: NVIDIA Blackwell (RTX 5070 Ti), CUDA 12.x.
+Experiments with training and fine-tuning LLM models. GPU: NVIDIA Blackwell (RTX 5070 Ti), CUDA 13.x.
 
 Naming scheme: `grpo_NN_*` = GRPO/RL experiments (increasing model size) · `lc_NN_*` = fine-tuning classifiers · `bench_NN_*` = inference runtime benchmarks (bash)
 
@@ -79,6 +79,13 @@ Goal: IMDB sentiment classification via fine-tuning pre-trained models with LoRA
 | `lc_07_gemma2b_imdb.py` | gemma-2-2b-it | 2B | 10 | 1e-4 |
 | `lc_08_gemma9b_imdb.py` | gemma-2-9b-it | 9B | 3 | 1e-4 |
 | `lc_09_gemma12b_imdb.py` ★ | gemma-3-12b-pt | 12B | 3 | 1e-4 |
+
+`lc_07_1`/`lc_08_1`/`lc_09_1_*_liger.py` — identical hyperparameters, but the Gemma
+module classes are patched with [Liger](https://github.com/linkedin/Liger-Kernel)
+fused Triton kernels (RMSNorm, RoPE, GeGLU) before loading, for a step-time and
+peak-VRAM comparison against the plain runs (FusedLinearCrossEntropy is inert for
+SEQ_CLS heads). Outputs go to separate `*-liger` dirs; peak VRAM is printed after
+training.
 
 > **Ranking (measured 2026-07-27, full 25k test set):** `ModernBERT-large` (96.2%) > `gemma3-12b` ≈ `gemma2-9b` (94.6%) > `gemma2-2b` (93.5%) > `roberta-large` (92.7%) > `distilbert` (87.1%) ≫ `electra-large` (training diverged, 50%)
 >
@@ -519,7 +526,7 @@ outputs/
 
 ---
 
-## Installation — Blackwell (CUDA 12.x)
+## Installation — Blackwell (legacy Python venv recipes, CUDA 12.x era)
 
 ### Blackwell compatibility
 - https://github.com/unslothai/unsloth/issues/1679#issuecomment-2776622643
@@ -597,6 +604,22 @@ pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
 - https://github.com/vllm-project/vllm/issues/14452
 - https://github.com/pytorch/pytorch/issues/145949
 - https://github.com/comfyanonymous/ComfyUI/issues/7127
+
+### Current install method: Gentoo ebuilds (pwr overlay)
+
+The Python venv recipes above are **legacy** and kept for reference only. The whole
+training/inference stack is now installed system-wide via Gentoo ebuilds from the
+[`pwr` overlay](https://github.com/pwasiewi/pwr) — PyTorch (`sci-ml/caffe2`),
+`dev-python/vllm`, `dev-python/triton-bin`, `sci-ml/unsloth` + `sci-ml/unsloth-zoo`,
+`dev-python/flash-attn`, `dev-python/bitsandbytes`, plus TRL/PEFT/accelerate.
+Portage tracks current upstream versions (live `-9999` ebuilds where needed), keeps
+the ABI of the whole stack in lock-step, and carries the local patches (Blackwell
+sm_120 fixes, Unsloth GRPO fixes) that a venv build would lose on every reinstall.
+
+```sh
+sudo emaint sync -r pwr
+sudo emerge sci-ml/caffe2 dev-python/vllm sci-ml/unsloth
+```
 
 ### LED / RGB (Blackwell)
 - https://gitlab.com/CalcProgrammer1/OpenRGB/-/issues/4710
