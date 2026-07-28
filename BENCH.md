@@ -318,6 +318,52 @@ Flags like bench_04: `-b` depth sweep only, `-s` server test only, `-m` MTP
 comparison only (requires `MTP_MODEL`); no flag = all (skips `-m` when
 `MTP_MODEL` is unset).
 
+## HF sweep — 2026-07-28: fleet files all current; new candidate GGUFs spotted (untested)
+
+Checked every fleet repo's `lastModified` on HF against the local download
+dates: **nothing to re-download**. The one scare — `deepreinforce-ai/
+Ornith-1.0-35B-GGUF` shows a delete (07-15) + re-upload (07-18) of
+`ornith-1.0-35b-Q4_K_M.gguf`, i.e. after our 07-13 download — resolved
+clean: the LFS OID of the re-uploaded file (`ff25291b…`) is byte-identical
+to the local HF-cache blob. All other fleet repos (unsloth gpt-oss-20b,
+HauhauCS gpt-oss/qwen36, unsloth Qwen3.6/GLM-4.7-Flash, ornith-9b, Jackrong
+dsv4flash, Qwythos v2, ggml-org embed/rerank) predate the local copies.
+
+New candidates found in the same sweep, none benched yet. The first three
+target current defaults directly:
+
+1. **`unsloth/Ornith-1.0-35B-GGUF`** (new repo, 07-17) — official unsloth
+   UD quants of the serious-agentic default. `UD-IQ4_XS` is 16.56 GiB vs
+   the current Q4_K_M's 19.7 GiB → lower `--n-cpu-moe` floor → faster tg.
+   Same move that made `udq8kxl` win on gpt-oss, BUT UD-IQ4_XS was the
+   uniquely-failing quant on qwen36 — bench before switching.
+2. **Eagle3 speculative decoding for gpt-oss-20b** — llama.cpp master
+   (2026-07-28, PR #25794) adds eagle3-v3 support for gpt-oss, and a 20b
+   draft exists: `RedHatAI/gpt-oss-20b-speculator.eagle3` (44k downloads,
+   safetensors — needs GGUF conversion). First realistic shot at speeding
+   up the fast-tier default's *decode* (bandwidth-bound, flat under every
+   quant/build change so far). Requires a llama.cpp rebuild (build ≥ Jul 28).
+3. **MTP variants of existing fleet models**: `SC117/Ornith-1.0-35B-MTP-
+   APEX-GGUF`, `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`, `Jackrong/Qwen3.5-9B-
+   DeepSeek-V4-Flash-MTP-GGUF`. MTP gave qwythos +75% tg for −25% pp; for
+   ornith-128k (~52 tok/s) this is potentially the biggest practical win.
+   Known risk: the Xid 8 hang at ~69K ctx with `--spec-type draft-mtp`.
+4. **`tvall43/Qwen3.6-14B-A3B-FableVibes-GGUF`** — first sighting of the
+   14B-A3B MoE size class (Q4_K_M 7.88 GiB, + vision mmproj): fits WHOLE
+   in VRAM even at 131072 ctx. New shelf between qwythos and the 35Bs;
+   community finetune, base-model quality unknown.
+5. **`prism-ml/Ternary-Bonsai-27B-gguf`** — ternary (BitNet-style) 27B at
+   6.67 GiB: the first 27B that fits whole (the dense-27B family was
+   REJECTED on VRAM). Base repo has 2.3M downloads. Has a `dspark` draft
+   variant (DSpark spec-decode landed in llama.cpp master 07-28 too).
+   Agentic quality is a complete unknown — cheap to bench.
+6. **`empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF`** — 1M-ctx sibling of
+   the fleet's Qwythos v2, 3× its downloads (1.26M).
+
+Rejected on size for 16 GB VRAM @128K: Laguna-S-2.1 (Q4 89 GiB),
+Laguna-XS-2.1 (Q4 18.9 GiB dense — the 27B-class wall), KAT-Coder-V2.5
+(~32B dense), MiniMax-M3, Kimi-K3.
+
 ## Reference results — 2026-07-19: gpt-oss20b-udq8kxl — new fast-tier default, beats q8_0 on parser-tier reliability
 
 `gpt-oss-20b-UD-Q8_K_XL.gguf` (unsloth/gpt-oss-20b-GGUF, UD dynamic quant,

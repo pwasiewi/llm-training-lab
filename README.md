@@ -92,6 +92,27 @@ accuracy unchanged.
 >
 > ModernBERT (Dec 2024): rotary embeddings, Flash Attention 2, 8192-token context, ~24% faster than RoBERTa.
 
+#### Newer encoder-only releases (HF sweep 2026-07-28 — candidates, untested)
+
+The encoder-only class is still alive, just lower-volume and more
+specialized. Spotted in a HF sweep, potential additions to the comparison
+above (and candidates for the Gentoo-log DAPT/triage-encoder idea):
+
+| Model | Released | Params | Notes |
+|-------|----------|--------|-------|
+| `LiquidAI/LFM2.5-Encoder-350M` | 2026-07-27 | 350M | Bidirectional MLM on the hybrid LFM2 arch (conv+attention); 15 languages **incl. Polish**; positioned as a fine-tune base for classification/NER/retrieval/rerank, on-device focus; claims "ahead of every model its size or smaller". License `lfm1.0` (custom, "other") — review before commercial use. Same size shelf as ModernBERT-large (395M) |
+| `LiquidAI/LFM2.5-Encoder-230M` | 2026-07-27 | 230M | Lightweight sibling for latency/memory budgets |
+| `jhu-clsp/mmBERT-base` | 2025 | 140M+ | Multilingual ModernBERT descendant (JHU), ~550k downloads; the Ettin suite is from the same team |
+| `nvidia/Nemotron-3-Embed-1B` / `-8B` | 2026-07-14 | 1B/8B | Embedding class (not MLM); BF16 + NVFP4 variants |
+| `google/embeddinggemma-300m` | 2025 | 300M | Embedding class, on-device |
+
+Trend note: most new "encoders" are embedding models (often distilled from
+decoders, e.g. Qwen3-Embedding); pure MLM encoders like LFM2.5-Encoder and
+the ModernBERT family remain the go-to for cheap task-specific classifiers.
+For the log-triage DAPT idea, `LFM2.5-Encoder-350M` is the main new
+counter-candidate to ModernBERT-large (fresher pretrain, multilingual —
+mixed Polish/English log lines).
+
 #### VRAM tuning (2026-07-27, RTX 5070 Ti 16 GB, transformers 5.12 / torch 2.14)
 
 Batch sizes probed empirically (4 train steps + full eval step per script); effective
