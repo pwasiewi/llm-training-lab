@@ -85,7 +85,8 @@ module classes are patched with [Liger](https://github.com/linkedin/Liger-Kernel
 fused Triton kernels (RMSNorm, RoPE, GeGLU) before loading, for a step-time and
 peak-VRAM comparison against the plain runs (FusedLinearCrossEntropy is inert for
 SEQ_CLS heads). Outputs go to separate `*-liger` dirs; peak VRAM is printed after
-training.
+training. Results: see "Liger kernel comparison" below — 9–15% faster epochs,
+accuracy unchanged.
 
 > **Ranking (measured 2026-07-27, full 25k test set):** `ModernBERT-large` (96.2%) > `gemma3-12b` ≈ `gemma2-9b` (94.6%) > `gemma2-2b` (93.5%) > `roberta-large` (92.7%) > `distilbert` (87.1%) ≫ `electra-large` (training diverged, 50%)
 >
@@ -154,6 +155,30 @@ Notes:
 - Compute-for-accuracy is brutal at the top: ModernBERT-large gets the best accuracy at
   55 min total, while gemma-3-12b burns 4 h for −1.6 pp. The 9B→12B step gains nothing
   (94.55% vs 94.60%); IMDB@128 tokens saturates around ~94.6% for decoder LoRA.
+
+#### Liger kernel comparison (2026-07-28, `lc_0X_1_*_liger.py` vs plain runs above)
+
+Same hyperparameters, seed and data; the only change is patching the Gemma module
+classes with Liger fused Triton kernels (RMSNorm, RoPE, GeGLU) before loading.
+Times from checkpoint mtimes (same methodology as above); test accuracy = saved
+adapter re-evaluated on the full 25k test set by `lc_0X_1_*_liger_test.py`
+(vanilla classes, no Liger — also proves the artifact is portable).
+
+| Script | Model | Time/epoch plain → liger | Speedup | Best eval acc plain → liger | Test acc (saved) |
+|---|---|---|---|---|---|
+| `lc_07_1` | gemma-2-2b nf4 | 13.8 → 11.9 min | **−13.6%** | 93.50 → 93.41% | 93.41% |
+| `lc_08_1` | gemma-2-9b nf4 | 65.5 → 55.7 min | **−15.0%** | 94.56 → 94.63% | 94.59% |
+| `lc_09_1` | gemma-3-12b nf4 | 82 → 74.4 min | **−9.3%** | 94.60 → 94.80% | 94.80% |
+
+Notes:
+- Verdict: **9–15% faster epochs at unchanged accuracy** — all metric deltas are
+  ≤0.2 pp, within single-run sampling noise (do not read the 12B "+0.2 pp" as a win
+  without a multi-seed comparison).
+- The speedup profile matches the mechanism: the 9B gains most (wide batch 32 with
+  grad checkpointing ON → lots of RMSNorm/GeGLU recompute that Liger fuses), the 12B
+  least (bs=8, proportionally more time in attention and nf4 quant/dequant, which
+  Liger does not touch). FusedLinearCrossEntropy stays inert for SEQ_CLS heads.
+- Total wall clock for the three runs: ~7 h 18 min vs ~8 h 20 min plain.
 
 ---
 
