@@ -2,7 +2,7 @@
 
 Experiments with training and fine-tuning LLM models. GPU: NVIDIA Blackwell (RTX 5070 Ti), CUDA 13.x.
 
-Naming scheme: `grpo_NN_*` = GRPO/RL experiments (increasing model size) · `lc_NN_*` = fine-tuning classifiers · `bench_NN_*` = inference runtime benchmarks (bash)
+Naming scheme: `simple_NN_*` = teaching lesson series (from-scratch fundamentals) · `grpo_NN_*` = GRPO/RL experiments (increasing model size) · `lc_NN_*` = fine-tuning classifiers · `bench_NN_*` = inference runtime benchmarks (bash)
 
 ---
 
@@ -10,47 +10,29 @@ Naming scheme: `grpo_NN_*` = GRPO/RL experiments (increasing model size) · `lc_
 
 ---
 
-### 1. Mini-LLM from Scratch in PyTorch
+### 1. From-Scratch Fundamentals — Lesson Series (`simple_NN_*`)
 
-Goal: learn transformer fundamentals — custom BPE tokenizer, custom architecture, training on text.
-Dataset: `wikimedia/wikipedia`. Config: vocab=5000, hidden=256, 4 heads, 4 layers.
+Goal: learn how LLMs work from first principles — seven standalone teaching
+scripts with the theory in the comments, GPU-verified 2026-07-30.
+**Full learning path, per-lesson concepts and the old→new file mapping:
+[simple_README.md](simple_README.md).**
 
-| File | Description |
-|------|-------------|
-| `simple_llm03.py` | transformer from scratch + BPE + `TOKENIZERS_PARALLELISM` |
+| File | Lesson |
+|------|--------|
+| `simple_01_gpt_tinystories.py` | pretrain a tiny GPT (BPE, causal mask, perplexity, sampling) |
+| `simple_02_imdb_encoder.py` | encoder classifier, `--arch classic\|modern` (RoPE, GeGLU, sliding-window attention) |
+| `simple_03_imdb_library.py` | same encoder via `nn.TransformerEncoder` + bf16 autocast |
+| `simple_04_vram_math.py` | training VRAM estimation by hand (no GPU needed) |
+| `simple_05_augmentation.py` | label-preserving text augmentation (WordNet + EDA) |
+| `simple_06_hybrid_pretransformer.py` | transformer+BiLSTM+CNN hybrid, `--lstm-depth 1\|3`, data-leakage lesson |
+| `simple_07_scaling_ablation.py` | measured cost-vs-seq-length scaling exponents |
 
----
-
-### 2. IMDB Classification from Scratch — Pure Transformer
-
-Goal: custom transformer (no LSTM/CNN) for IMDB sentiment analysis.
-Config: hidden=512, 6 layers, max_seq=512.
-
-| File | Description |
-|------|-------------|
-| `simple_imdb.py` | base transformer |
-| `simple_imdb_extended.py` | extended (more data / epochs) |
-| `simple_imdb_augmented.py` | + data augmentation |
-| `simple_imdb_trf.py` | architecture variant |
-| `simple_imdb_check.py` | saved model evaluation |
+> Replaces the old `simple_llm03.py`, `simple_imdb*.py` and `simple_lstm_cnn*.py`
+> scripts (deleted 2026-07-30) — the mapping table is in simple_README.md.
 
 ---
 
-### 3. IMDB Classification from Scratch — LSTM+CNN+Transformer Hybrid
-
-Goal: custom hybrid architecture (Transformer → LSTM → CNN) on IMDB.
-
-| File | Architecture | hidden / filters | train |
-|------|-------------|-----------------|-------|
-| `simple_lstm_cnn_trf_res.py` | Transformer + 2×LSTM + residual + CNN | 512 / 200 | 23k |
-| `simple_lstm_cnn_trf_res4.py` ★ | 3×LSTM + residual + CNN filters (3,4,5,7,9) | 512 / 50 | 23k |
-| `simple_lstm_cnn_check.py` | saved model evaluation | — | — |
-
-> `_res4` best: 3 LSTM layers with skip connections + CNN filters at 5 sizes (3,4,5,7,9).
-
----
-
-### 4. Fine-tuning Pre-trained Models on IMDB with LoRA (`lc_NN_*`)
+### 2. Fine-tuning Pre-trained Models on IMDB with LoRA (`lc_NN_*`)
 
 Goal: IMDB sentiment classification via fine-tuning pre-trained models with LoRA/QLoRA.
 
@@ -203,7 +185,7 @@ Notes:
 
 ---
 
-### 5. GRPO + LoRA Fine-tuning on GSM8K (`grpo_NN_*`)
+### 3. GRPO + LoRA Fine-tuning on GSM8K (`grpo_NN_*`)
 
 Goal: improve mathematical reasoning via GRPO (reinforcement learning).
 Dataset: GSM8K (math problems). Framework: unsloth + trl.
@@ -464,7 +446,7 @@ Consequences on 16 GB (bf16 needs TWO full weight copies — trainer + engine):
 
 ---
 
-### 6. Other
+### 4. Other
 
 | File | Description |
 |------|-------------|
@@ -472,7 +454,7 @@ Consequences on 16 GB (bf16 needs TWO full weight copies — trainer + engine):
 
 ---
 
-### 7. Inference Runtime Benchmarks (`bench_NN_*.sh`)
+### 5. Inference Runtime Benchmarks (`bench_NN_*.sh`)
 
 Goal: compare local inference runtimes (llama.cpp vs ik_llama.cpp vs ollama)
 on the same GGUF with MoE CPU/GPU offload tuned for 16 GB VRAM.
@@ -543,7 +525,7 @@ All IMDB test files (rewritten 2026-07-27) load the base model explicitly and ap
 adapter via `PeftModel.from_pretrained`, then run batched inference over the **full 25k
 test set**. Do not load the adapter directory directly with `AutoModelForSequenceClassification`
 — it silently attaches a randomly initialized classification head (see "Final results"
-notes in section 4). Results: section 4, "Final results (2026-07-27)".
+notes in section 2). Results: section 2, "Final results (2026-07-27)".
 
 ---
 
@@ -563,9 +545,10 @@ outputs/
   lora-bert-roberta2/              # lc_ fine-tuned models
   lora-modernbert-imdb/
   ...
-  best_hybrid_double_light_res.pt  # simple_lstm_cnn best weights
-  best_hybrid_double_light_res4.pt
-  best_sentiment_model.pt          # simple_imdb best weights
+  best_encoder_classic.pt          # simple_02 checkpoints (also _modern, _library)
+  best_hybrid_depth1.pt            # simple_06 checkpoint (also _depth3)
+  imdb_train_augmented.csv         # simple_05 output
+  scaling_ablation.png             # simple_07 plot
   logs/                            # HuggingFace Trainer logs
   optuna-distilbert-*/             # Optuna trial checkpoints
 ```
