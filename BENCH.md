@@ -364,6 +364,63 @@ Rejected on size for 16 GB VRAM @128K: Laguna-S-2.1 (Q4 89 GiB),
 Laguna-XS-2.1 (Q4 18.9 GiB dense — the 27B-class wall), KAT-Coder-V2.5
 (~32B dense), MiniMax-M3, Kimi-K3.
 
+## Reference results — 2026-08-18: Nemotron-3.5-Lightning-30B-A3B + Qwen3.8-27B — leader unbeaten; the VRAM-fit rule
+
+Two fresh 2026-08 releases hunted after the host stack rebuild. Both needed a
+llama.cpp master rebuild first (older builds reject the GGUFs outright).
+
+### qwen38 (Qwen3.8-27B UD-Q4_K_XL 17.9G, dense, thinking) — FAILED TEST, model removed
+
+The 27B-dense wall from the size-rejection list above, now measured instead
+of assumed: 17.9G does not fit 16 GB VRAM, `-ngl 48` (16/64 layers on CPU)
+gives **4.5 t/s decode**, and thinking mode multiplies the token bill.
+Bench: **0/8 with every task dying at 810–854 s against the 900 s timeout**
+— most tasks never even created the target file. Same failure shape as
+gemma4-12b-it (timeout class), different cause (throughput, not parser).
+
+**Rule going forward: a dense candidate whose quant does not fit whole in
+VRAM (weights + KV, desktop running) is disqualified for the agentic tier UP
+FRONT.** Partial-offload decode (~5 t/s) turns every task into a
+near-timeout FAIL regardless of model quality — one 30-second curl speed
+check settles it, not two hours of bench. MoE candidates are exempt (expert
+offload keeps decode fast: the qwen36 / ornith / glm-flash / nemotron
+pattern). GGUF deleted, profile removed from models.conf.
+
+### nemotron (NVIDIA-Nemotron-3.5-Lightning-30B-A3B, MoE A3B Mamba2-hybrid, ggml-org Q4_0 18G) — 7/12 single run, leader NOT dethroned
+
+`--n-cpu-moe 18`, 13.6G VRAM, **68 t/s decode** — fastest big candidate yet.
+
+| task | verdict | time | score |
+| --- | --- | --- | --- |
+| bugfix | PASS | 62s | 4/4 |
+| scratch | PASS | 104s | 6/6 |
+| lru | PASS | 57s | 8/8 |
+| multifile | FAIL | 211s | 4/5 (80%) |
+| intervals | PASS | 128s | 12/12 |
+| fsm | PASS | 169s | 13/13 |
+| codec | PASS | 275s | 12/12 |
+| toposort | PASS | 68s | 11/11 |
+| template | FAIL | 172s | 9/10 (90%) |
+| interp | FAIL | 331s | 0/13 |
+| perf | FAIL | 409s | 5/6 (83%) |
+| regex | FAIL | 324s | 0/14 |
+
+**Verdict: 7/12 PASS (58%), mean score ~79%, zero timeouts** — vs the
+leader gpt-oss20b-udq8kxl's pooled ~50% PASS. Promising, but by our own
+bench_07 lesson a single run does not rank (N=20 minimum) — **the leader
+stays unbeaten until a pooled run says otherwise.** The two 0% tasks are
+the parser tier (interp, regex), the same axis every non-leader fails.
+Unused reserves for the rematch: the separate `mtp-…-Q4_0.gguf` draft file
+(`--spec-type draft-mtp`, untested) and a 128K-context profile.
+
+Quant gotcha (cost an evening): unsloth's UD quants of this model embed the
+`blk.*.nextn.*` MTP tensors in the main GGUF — mainline llama.cpp then dies
+with `done_getting_tensors: wrong number of tensors; expected 417, got 408`
+(it only consumes 408 for `nemotron_h_moe`; for qwen3.8 the same surplus is
+merely a warning). The working pair is ggml-org's own conversion: main
+Q4_0 + separate mtp file. The 25.5G UD-Q4_K_XL was deleted with nothing to
+load it; re-download if llama.cpp ever learns embedded nextn for this arch.
+
 ## Reference results — 2026-07-19: gpt-oss20b-udq8kxl — new fast-tier default, beats q8_0 on parser-tier reliability
 
 `gpt-oss-20b-UD-Q8_K_XL.gguf` (unsloth/gpt-oss-20b-GGUF, UD dynamic quant,

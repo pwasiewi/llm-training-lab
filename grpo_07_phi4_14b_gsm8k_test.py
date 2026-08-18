@@ -16,6 +16,8 @@ import sys
 import re
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")   # flashinfer runtime JIT: nvcc (CUDA 13.3) rejects host gcc-16, -ccbin comes from $CC
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 

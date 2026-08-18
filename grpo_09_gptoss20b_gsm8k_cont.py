@@ -20,6 +20,8 @@ os.environ.setdefault("GLOG_minloglevel", "2")          # caffe2/glog: hide INFO
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")   # flashinfer runtime JIT: nvcc (CUDA 13.3) rejects host gcc-16, -ccbin comes from $CC
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
@@ -194,7 +196,7 @@ training_args = GRPOConfig(
     adam_beta1=0.9,
     adam_beta2=0.99,
     weight_decay=0.1,
-    warmup_ratio=0.1,
+    warmup_steps=20,  # TRL 1.10 dropped warmup_ratio (was 0.1 ~ 10% of a GSM8K epoch)
     lr_scheduler_type="cosine",
     optim="paged_adamw_8bit",
     logging_steps=1,

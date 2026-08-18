@@ -12,6 +12,8 @@ os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")   # flashinfer runtime JIT: nvcc (CUDA 13.3) rejects host gcc-16, -ccbin comes from $CC
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
