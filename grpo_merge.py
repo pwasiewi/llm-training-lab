@@ -35,6 +35,48 @@ def die(msg):
     sys.exit(1)
 
 
+def merge_fidelity(ckpt, before, after, sample=8):
+    """How much of W += BA actually landed in the saved bf16 weights?
+
+    bf16 keeps 8 mantissa bits, so a weight of magnitude 3e-2 has a ULP of ~1.2e-4.
+    A small LoRA update (|BA| ~ 5e-6 after a short low-lr run) is far below half a
+    ULP and round-to-nearest discards it *entirely*: g1 kept 6% of its update and
+    left 93% of the individual weights bit-identical to the base (2026-09-09).
+    The merged model then benchmarks as the base model and the run looks like a null.
+
+    The older tripwire only caught the opposite failure (|B| exploding to ~1e13,
+    the 2026-07-24 aliasing bug), so this direction went unnoticed for four runs.
+    """
+    import torch
+    from safetensors.torch import safe_open
+    with open(os.path.join(ckpt, "adapter_config.json")) as f:
+        cfg = json.load(f)
+    scale = cfg["lora_alpha"] / cfg["r"]
+    lo = {}
+    with safe_open(os.path.join(ckpt, "adapter_model.safetensors"), "pt") as h:
+        for k in h.keys():
+            lo[k] = h.get_tensor(k)
+    names = sorted({k.split(".lora_")[0] for k in lo if ".lora_A" in k})
+    if not names:
+        return None
+    step = max(1, len(names) // sample)
+    kept_num = kept_den = 0.0
+    zeros = []
+    for n in names[::step]:
+        key = n.replace("base_model.model.", "") + ".weight"
+        if key not in before:
+            continue
+        a, b = lo[n + ".lora_A.weight"].float(), lo[n + ".lora_B.weight"].float()
+        intended = (b @ a) * scale
+        actual = after[key].float() - before[key]
+        kept_num += (actual - intended).pow(2).sum().item()
+        kept_den += intended.pow(2).sum().item()
+        zeros.append((actual == 0).float().mean().item())
+    if kept_den == 0:
+        return None
+    return 1 - (kept_num / kept_den) ** 0.5, sum(zeros) / len(zeros), len(zeros)
+
+
 def main():
     ap = argparse.ArgumentParser(description="CPU-only PEFT merge of a grpo_* LoRA checkpoint.")
     ap.add_argument("model_path", help="merged output dir (e.g. outputs/lora-grpo-phi4-mini-v2)")
@@ -77,8 +119,31 @@ def main():
 
     print(f"Merging adapter: {ckpt}  (base: {base_name})  ->  {args.model_path}")
     base = AutoModelForCausalLM.from_pretrained(base_name, dtype=torch.bfloat16)
+
+    from safetensors.torch import safe_open
+    with safe_open(os.path.join(ckpt, "adapter_model.safetensors"), "pt") as _h:
+        _adapted = {k.split(".lora_")[0].replace("base_model.model.", "") + ".weight"
+                    for k in _h.keys() if ".lora_A" in k}
+    sd = base.state_dict()
+    before = {k: sd[k].detach().float().clone() for k in sorted(_adapted)[::max(1, len(_adapted) // 8)]
+              if k in sd}
+
     model = PeftModel.from_pretrained(base, ckpt)
     model = model.merge_and_unload()
+
+    fid = merge_fidelity(ckpt, before, model.state_dict())
+    if fid:
+        kept, zero, n = fid
+        print(f"merge fidelity ({n} sampled tensors): {kept:.1%} of the update survived bf16, "
+              f"{zero:.1%} of weights unchanged")
+        if kept < 0.5:
+            print(f"grpo_merge: WARNING — the bf16 merge discarded {1 - kept:.0%} of this adapter.\n"
+                  f"  The update is below bf16 resolution, so {args.model_path} will benchmark\n"
+                  f"  close to the base model no matter how well training went. Saving in fp32\n"
+                  f"  does not help: any bf16 runtime re-quantises it away at load.\n"
+                  f"  Evaluate through the adapter instead:\n"
+                  f"    python grpo_11_qwen3_17b_math_test.py {base_name} --lora {ckpt}",
+                  file=sys.stderr)
 
     # A previous merge may have left a different shard layout; stale shards or a
     # stale model.safetensors.index.json make vLLM raise FileNotFoundError.

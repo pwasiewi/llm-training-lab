@@ -49,10 +49,15 @@ Goal: IMDB sentiment classification via fine-tuning pre-trained models with LoRA
 | File | Model | Params | Epochs | lr |
 |------|-------|--------|--------|----|
 | `lc_03_distilbert_imdb.py` | distilbert-base-uncased | 66M | 15 | 2e-4 |
-| `lc_03_distilbert_imdb_optuna.py` | distilbert + Optuna HPO | 66M | auto | auto |
-| `lc_04_electra_imdb.py` | electra-large-discriminator | 335M | 30 | 3e-4 |
+| `lc_03_distilbert_imdb_optuna.py` | distilbert + Optuna HPO | 66M | auto | auto | superseded by `lc_10` |
+| `lc_04_electra_imdb.py` | electra-large-discriminator | 335M | 30 | 3e-4 | **diverges — use `lc_04_2`** |
+| `lc_04_1_electra_imdb_bf16.py` | same, bf16 instead of fp16 | 335M | 30 | 3e-4 | negative control, still diverges |
+| `lc_04_2_electra_imdb_lr.py` ★ | same, lr 1e-4 | 335M | 30 | 1e-4 | the fix |
 | `lc_05_roberta_imdb.py` ★ | roberta-large | 355M | 30 | 2e-4 |
+| `lc_05_1_roberta_imdb_targets.py` | same, LoRA on 6 modules not 2 | 355M | 30 | 2e-4 | negative control, no change |
 | `lc_06_modernbert_imdb.py` ★ | ModernBERT-large | 395M | 10 | 2e-4 |
+| `lc_11_neobert_imdb.py` | NeoBERT | 250M | 10 | 2e-4 | needs `sci-ml/xformers` |
+| `lc_10_hpo_lora.py` | Optuna harness for all of the above | — | — | searched |
 
 #### Generative Models (Gemma)
 
@@ -70,11 +75,19 @@ SEQ_CLS heads). Outputs go to separate `*-liger` dirs; peak VRAM is printed afte
 training. Results: see "Liger kernel comparison" below — 9–15% faster epochs,
 accuracy unchanged.
 
-> **Ranking (measured 2026-07-27, full 25k test set):** `ModernBERT-large` (96.2%) > `gemma3-12b` ≈ `gemma2-9b` (94.6%) > `gemma2-2b` (93.5%) > `roberta-large` (92.7%) > `distilbert` (87.1%) ≫ `electra-large` (training diverged, 50%)
+> **Ranking (2026-07-27, full 25k test set; electra and NeoBERT measured 2026-09-10):** `ModernBERT-large` (96.2%) ≳ `NeoBERT` (95.9%) > `gemma3-12b` ≈ `gemma2-9b` (94.6%) > `gemma2-2b` (93.5%) > `electra-large` (93.4%, at lr 1e-4 — see below) > `roberta-large` (92.7%) > `distilbert` (87.1%)
 >
 > ModernBERT (Dec 2024): rotary embeddings, Flash Attention 2, 8192-token context, ~24% faster than RoBERTa.
+>
+> The top two are 0.24 pp apart on the saved adapters (96.16 vs 95.92), against a
+> single-proportion SE of ≈0.12 pp at n=25000 — so roughly 1–2 SE, from one run
+> each, with no seed replication and no McNemar test on the paired predictions.
+> Read it as "indistinguishable on this benchmark", not as a ranking. What is
+> not ambiguous: NeoBERT reaches it with 145M fewer parameters and a 24%
+> shorter epoch. IMDB is saturated (see the 9B→12B note below), so it cannot
+> separate these two — a harder task would be needed to.
 
-#### Newer encoder-only releases (HF sweep 2026-07-28 — candidates, untested)
+#### Newer encoder-only releases (HF sweep 2026-07-28; NeoBERT since tested)
 
 The encoder-only class is still alive, just lower-volume and more
 specialized. Spotted in a HF sweep, potential additions to the comparison
@@ -82,6 +95,7 @@ above (and candidates for the Gentoo-log DAPT/triage-encoder idea):
 
 | Model | Released | Params | Notes |
 |-------|----------|--------|-------|
+| `chandar-lab/NeoBERT` | 2025-02 | 250M | **TESTED 2026-09-10 → `lc_11`, 95.92%.** Deep-and-narrow (28 × 768), SwiGLU, RMSNorm, RoPE, 4096 ctx; claims to beat ModernBERT-large on GLUE/MTEB with 145M fewer params. On IMDB it lands 0.24 pp below it in 42 min vs 55 — indistinguishable at this saturation level. Requires `sci-ml/xformers`; see the NeoBERT section below for four traps, one of them silent |
 | `LiquidAI/LFM2.5-Encoder-350M` | 2026-07-27 | 350M | Bidirectional MLM on the hybrid LFM2 arch (conv+attention); 15 languages **incl. Polish**; positioned as a fine-tune base for classification/NER/retrieval/rerank, on-device focus; claims "ahead of every model its size or smaller". License `lfm1.0` (custom, "other") — review before commercial use. Same size shelf as ModernBERT-large (395M) |
 | `LiquidAI/LFM2.5-Encoder-230M` | 2026-07-27 | 230M | Lightweight sibling for latency/memory budgets |
 | `jhu-clsp/mmBERT-base` | 2025 | 140M+ | Multilingual ModernBERT descendant (JHU), ~550k downloads; the Ettin suite is from the same team |
@@ -108,11 +122,20 @@ the same 4-step smoke (includes warmup, so real epochs run slightly faster).
 | `lc_04` electra-large | 32 / 128 | 1 | 32 | off | 6.0 GiB | ~167 |
 | `lc_05` roberta-large | 32 / 128 | 1 | 32 | off | 5.8 GiB | ~129 |
 | `lc_06` modernbert (seq 512) | 16 / 64 | 2 | 32 | off | 12.6 GiB | ~33 |
+| `lc_11` neobert (seq 512) | 16 / 64 | 2 | 32 | off | 10.5 GiB | ~61 † |
 | `lc_07` gemma-2-2b nf4 | 16 / 32 | 2 | 32 | off | 13.5 GiB | ~33 |
 | `lc_08` gemma-2-9b nf4 | 32 / 64 | 4 | 128 | on | 12.5 GiB | ~8.1 |
 | `lc_09` gemma-3-12b nf4 | 8 / 16 | 2 | 16 | on | 11.9 GiB | ~6.0 |
 
 Notes:
+- † `lc_11`'s figure is derived from the real training run, not from the 4-step
+  smoke used for every other row, so it is the *higher-quality* number and not
+  directly comparable to them (the smoke includes warmup and understates).
+  Derivation: 42.1 min wall − 4 evals × 217.8 s = 27.5 min of training for
+  4 × 25000 samples. **Do not read `train_samples_per_second` out of the log for
+  this**: HF reports 99.0, because it divides by the *configured* `num_train_epochs`
+  (10) rather than the 4 epochs early stopping actually ran — an over-report by
+  exactly the ratio of configured to run epochs, which bites any early-stopped run.
 - Batch scales with **activation memory**, not model size: small models with grad
   checkpointing OFF store the full backward graph (lc_07: 2B weights ≈ 2.5 GB but
   ~10 GB activations at bs=16), while the 9B/12B keep checkpointing ON and afford a
@@ -139,8 +162,11 @@ backbone + freshly initialized head) is chance level ≈ 50% for every model.
 |---|---|---|---|---|---|---|
 | `lc_03` | distilbert-base | 8 (best ep3) | ~40 s | ~7 min | — (eval_loss 0.398) | 87.14% |
 | `lc_04` | electra-large | 6 | 129 s | 13 min | 50.0% | **50.00% — failed** |
+| `lc_04_2` | electra-large @ lr 1e-4 | 4 (best ep3) | 134 s | 9 min | 93.32% | 93.36% |
 | `lc_05` | roberta-large | 4 (best ep2) | 120 s | 8 min | 92.84% | 92.72% |
+| `lc_05_1` | roberta-large, 6 LoRA modules | 4 (best ep2) | 141 s | 14 min | 92.80% | 92.77% |
 | `lc_06` | ModernBERT-large | 4 (best ep2) | 13.8 min | 55 min | 96.24% | 96.16% |
+| `lc_11` | NeoBERT (2026-09-10) | 4 (best ep2) | 10.5 min | 42 min | 95.94% | 95.92% |
 | `lc_07` | gemma-2-2b nf4 | 4 (best ep2) | 13.8 min | 55 min | 93.50% | 93.50% |
 | `lc_08` | gemma-2-9b nf4 | 3 (best ep1) | 65.5 min | 3 h 17 min | 94.56% | 94.55% |
 | `lc_09` | gemma-3-12b nf4 | 3 (best ep2) | 82 min | 4 h 08 min | 94.60% | 94.60% |
@@ -149,6 +175,34 @@ Notes:
 - **lc_04 (electra-large) diverged**: eval_loss pinned at ln 2 = 0.693 and accuracy at
   exactly 0.5 for all 6 epochs — the classic electra-large instability at lr 3e-4.
   Retry with lr ≈ 5e-5–1e-4 (and optionally warmup); not a loader or eval artifact.
+- **RESOLVED 2026-09-10, and the diagnosis above was correct.** `lc_04_2` is `lc_04`
+  with one number changed, lr 3e-4 → 1e-4: **93.36%** (Trainer best 93.32% at epoch 3,
+  early-stopped at 4, adapter re-loaded and re-scored on the full 25k to confirm).
+  electra-large therefore belongs above roberta-large in the ranking, not at the bottom.
+
+  Getting there took two wrong turns worth recording, because both are traps that
+  will recur:
+
+  | run | lr | train | precision | bias | prepare_* | result |
+  |---|---|---|---|---|---|---|
+  | `lc_04` | 3e-4 | 25k | fp16 | lora_only | yes | 0.5000 |
+  | `lc_04_1` | 3e-4 | 25k | **bf16** | lora_only | yes | 0.5000 |
+  | `lc_10` trial 0 | 3e-4 | **5k** | bf16 | none | no | **0.9250** |
+  | `lc_10` trial 0 | 3e-4 | 25k | bf16 | none | no | 0.5000 |
+
+  Rows 1–2 kill the precision hypothesis: fp16's GradScaler is not the cause, and
+  `lc_04_1` is kept as a labelled negative control rather than deleted. Rows 3–4 are
+  the same code with only the training-set size moved, which isolates the real
+  variable — the **number of optimizer steps near lr 3e-4** (782/epoch at 25k vs
+  157/epoch at 5k). Weight dtype, `bias="lora_only"` and the (spurious)
+  `prepare_model_for_kbit_training` call are all held constant across that pair and
+  are all innocent.
+
+  **The trap: an HPO study run on a subset never enters the regime containing the
+  bug it is meant to explain.** All 30 trials of the electra study below ran at 5k,
+  where this failure cannot happen, so trial 0's healthy 0.9250 actively misled the
+  diagnosis. Anything searched on a subset must be re-checked at full scale before
+  its conclusions are trusted.
 - **Test-file loader bug fixed (2026-07-27)**: the old `lc_*_test.py` loaded the adapter
   directory directly via `AutoModelForSequenceClassification.from_pretrained(adapter_dir)`,
   which silently instantiates a **randomly initialized classification head** (measured:
@@ -158,6 +212,180 @@ Notes:
 - Compute-for-accuracy is brutal at the top: ModernBERT-large gets the best accuracy at
   55 min total, while gemma-3-12b burns 4 h for −1.6 pp. The 9B→12B step gains nothing
   (94.55% vs 94.60%); IMDB@128 tokens saturates around ~94.6% for decoder LoRA.
+
+#### NeoBERT (2026-09-10, `lc_11_neobert_imdb.py`) — and a silent corruption bug
+
+[NeoBERT](https://huggingface.co/chandar-lab/NeoBERT) (Chandar Lab, Feb 2025) is
+the one entry in the "newer encoders" table below with a real claim on lc_06's
+spot: 250M params, reported to beat ModernBERT-large on GLUE/MTEB. Deep and
+narrow (28 × 768) where ModernBERT is wide, SwiGLU instead of GeGLU, RMSNorm
+pre-norm, RoPE, 4096-token context. Result: **95.92%** vs ModernBERT's 96.16%,
+in 42 min instead of 55 — see the ranking note above for why that gap does not
+establish an ordering.
+
+Getting it to run at all took four fixes, and **three of the four fail silently
+or point somewhere else**, which is the transferable part of this entry:
+
+| # | Symptom | Actual cause | How it fails |
+|---|---|---|---|
+| 1 | `ModuleNotFoundError: xformers` | remote code does an unguarded `from xformers.ops import SwiGLU` at module scope | loud, obvious |
+| 2 | `TypeError: forward() got an unexpected keyword argument 'inputs_embeds'` | `PeftModelForSequenceClassification.forward` passes it unconditionally; NeoBERT has no such parameter | loud, but the naive fix causes #3 |
+| 3 | `ValueError: You should supply an encoding ... you provided ['label']` | the shim for #2 written without `functools.wraps` destroys the forward signature that `Trainer._remove_unused_columns` inspects (it unwraps PeftModel via `get_base_model()` to do so), so `input_ids`/`attention_mask` are dropped as "unused columns" | loud, message points nowhere near the cause |
+| 4 | *nothing* — trains fine, scores plausibly | `freqs_cis` is registered `persistent=False`, so it is absent from the checkpoint; transformers 5 materializes the model from the state dict on a meta device and leaves the buffer as **uninitialized memory** | **silent** |
+
+Bug 4 is the one worth remembering. `torch.polar(ones_like(f), f)` guarantees
+`|freqs_cis| == 1.0` exactly, so any other magnitude is corruption. Measured
+across repeated loads of the *same* checkpoint, same input, same device:
+
+```
+|freqs_cis| absmax = 1.658e-39   (denormal noise)
+|freqs_cis| absmax = 3.251e+35   (huge)
+NaN                              (2 of 6 loads in one sample)
+```
+
+The NaN loads are the **lucky** ones: they crash. The rest run happily with
+rotary embeddings multiplied by garbage — the model loses all positional
+information, and still produces plausible activations, a decreasing loss, and a
+finished run. Had the first attempt not happened to draw NaN, this would have
+been written up as "NeoBERT underperforms on IMDB". The non-determinism is also
+what made it hard to find: eight loads gave three different behaviours, so every
+hypothesis that blamed a fixed thing (padding, PEFT wrapping, head init) was
+consistent with some of the evidence.
+
+Both shims live in `lc_neobert_compat.py` rather than being copy-pasted, and
+`patch_neobert()` asserts unit magnitude so #4 can never regress quietly. **The
+patch is required on the inference path too**: a saved adapter re-loaded without
+it scores at chance, which would look like a corrupted save rather than a
+corrupted load. `lc_11_neobert_imdb_test.py` applies it before
+`PeftModel.from_pretrained`.
+
+Two smaller traps, both specific to this checkpoint:
+- The classification head is **two** layers, `dense` (768→768) then `classifier`
+  (768→2), and the load report lists both as MISSING. PEFT's `SEQ_CLS` task type
+  adds only `classifier`/`score` to `modules_to_save` by default, so `dense`
+  would stay frozen at its random init — a random projection wired in front of
+  the classifier, training nothing. Both are named explicitly.
+- The revision is **pinned** (`5424c8ef`). This repo ships its model definition
+  as remote code, which transformers silently re-downloads when upstream edits
+  it; it pulled a new `rotary.py` mid-session while this script was being
+  written. `trust_remote_code=True` without a revision pin means the
+  architecture can change under a rerun.
+
+Packaging: `sci-ml/xformers-0.0.35` imported into `::pwr` from `::stuff`
+2026-09-10. The `::stuff` ebuild has a bug — its patch guards only the first
+disjunct of setup.py's three-way accelerator test, so the `TORCH_CUDA_ARCH_LIST`
+this host sets globally in `make.conf` for pytorch/caffe2 re-enables the CUDA
+build behind `XFORMERS_DISABLE_ACCELERATOR=1`, which then dies on
+`unsupported GNU version` (gcc 16.2 vs CUDA 13.3). The `::pwr` copy neutralizes
+`TORCH_CUDA_ARCH_LIST` and `FORCE_CUDA` with `local -x` in `python_compile`.
+Only `xformers.ops.SwiGLU` is needed, and it falls back to an eager PyTorch
+implementation that still runs on CUDA tensors, just unfused.
+
+#### Optuna HPO harness (2026-09-10, `lc_10_hpo_lora.py`)
+
+One harness for every backbone in the tables above (`--model distilbert|electra|
+roberta|modernbert|neobert`), replacing `lc_03_distilbert_imdb_optuna.py`. Studies
+are SQLite-backed so a run is resumable, the TPE sampler is seeded, and the
+published `lc_0N` config is enqueued as trial 0 so a study starts from the known
+result. `--final` retrains the winner on the full 25k and saves the adapter.
+
+The per-model registry carries whatever that backbone needs beyond the search
+space: `attn` (ModernBERT's FA2), `revision` + `trust_remote_code` +
+`modules_to_save` + a `patch` hook (NeoBERT — the pin, the two-layer head, and
+`patch_neobert`, all explained in the NeoBERT section above). Batch sizes are
+registry constants, not searched: they change the effective batch and therefore
+the meaning of `lr`, which would confound the one axis that matters.
+
+Five defects in the old script, worth knowing because four of them are silent:
+
+1. **Learning rate was fixed at 1e-4 and never searched** while r/alpha/dropout were.
+2. **The pruner was inert.** `pruner=None` disabled it, and the commented-out
+   `MedianPruner` above it would not have worked either — a pruner does nothing
+   unless something calls `trial.report()`/`should_prune()`, which with HF Trainer
+   needs a callback that did not exist. All 20 trials ran their full 20 epochs.
+   The new `OptunaPruningCallback` prunes 19 of 30 on electra.
+3. **Optimized `eval_loss` with no `compute_metrics`** — accuracy was never computed,
+   and the two diverge precisely when dropout is in the search space, which it was.
+4. **`lora_alpha` was suggested over a range depending on `lora_r`**, making the
+   search space dynamic; TPE models that badly. Search the alpha/r *ratio* instead.
+5. **`prepare_model_for_kbit_training()` on an unquantized model** — that helper is
+   for 4/8-bit backbones; here it mainly switched gradient checkpointing on and paid
+   recompute for nothing. (`lc_04` has the same spurious call.)
+
+Also: the dataset was re-tokenized inside every trial, there was no `storage=` so a
+crash lost the study, the sampler was unseeded, and each trial left an unreaped
+checkpoint dir.
+
+**transformers 5 gotcha:** `warmup_ratio` was removed — only `warmup_steps` survives,
+so a ratio must be resolved against the real optimizer-step count (`warmup_steps_for`).
+
+**`enqueue_trial()` gotcha:** every enqueued value must be a member of the
+distribution the objective declares, or the trial raises on the first `suggest_*()`
+call — *after* the dataset is tokenized. The published baselines are r=128/40/36/32
+with ratios 1, 3, 5/3, 2, so `r` and `alpha_ratio` are continuous here, not
+categorical. `--selftest` round-trips all five baselines through the real search
+space on CPU in about a second, and also checks that each `baseline["targets"]`
+names a tier that actually exists (a missing tier passes the distribution check and
+then `KeyError`s inside `build_model`). Run it after touching the registry.
+
+**Study inventory (2026-09-10):** one real study exists — electra, 5k subset,
+30 trials (11 complete, 19 pruned), best 0.9295 — plus a 1-trial diagnostic at
+full 25k that reproduced the 0.5000 divergence. distilbert, roberta, modernbert
+and neobert have never been searched. That is deliberate, not a backlog: see the
+coverage experiment below for why more searching on IMDB is expected to measure
+noise.
+
+**What the search actually bought on electra (5k subset, 30 trials): nothing.**
+Best 0.9295 vs baseline 0.9250 = +0.45 pp against a ±0.59 pp standard error on a
+2000-example eval, and that best is a maximum over 11 completed trials, so it is
+biased upward. Best-to-worst spread across all completed trials was 0.8 pp.
+Parameter importance flipped between the 3-trial smoke (`lr` 0.79, `r` 0.01) and the
+30-trial run (`r` 0.51, `lr` 0.25) — with a 0.8 pp spread it is partitioning noise,
+so **neither ranking should be quoted**. Optuna's value here was diagnostic, not
+optimizing: running the published config as trial 0 is what exposed the lc_04 story
+above. See the subset warning there before trusting any of these numbers.
+
+#### Does LoRA coverage matter more than the tuned knobs? (2026-09-10) — no
+
+`target_modules` was the one axis the harness held constant while searching five
+others, and it varies wildly across these scripts — which made it the obvious
+suspect for the "HPO bought nothing" result:
+
+| script | adapted modules | count |
+|---|---|---|
+| `lc_05` roberta-large | `query`, `key` | 2 |
+| `lc_04_2` electra-large | `query`, `key`, `value` | 3 |
+| `lc_06` ModernBERT-large | `Wqkv`, `Wo` | 2 names, **4 modules** |
+| `lc_03` distilbert | full attention + both FFN linears | 6 |
+| `lc_11` NeoBERT | `qkv`, `wo`, `w12`, `w3` | 4 names, full coverage |
+
+Note `lc_06`: ModernBERT names *both* `attn.Wo` and `mlp.Wo` the same, and PEFT
+matches by **name suffix**, so `["Wqkv", "Wo"]` is not "attention only" as its
+comment says — it already adapts the MLP output projection, leaving only
+`mlp.Wi` untouched. Verified against the real module tree. Worth checking on any
+model before assuming a target list means what it reads like.
+
+`lc_05` is the narrowest coverage in the series *and* roberta-large is the worst
+large encoder in the table (92.72%, below electra-large at 20M fewer params), so
+"the adapter never touches V, the attention output projection, or the FFN" was a
+plausible cause. `lc_05_1` tests it with one variable moved, r held at 36:
+
+| | trainable params | best eval | test (saved) | wall |
+|---|---|---|---|---|
+| `lc_05` (`query`, `key`) | 4.6M | 92.84% | 92.72% | 8 min |
+| `lc_05_1` (6 modules) | 17.0M | 92.80% | **92.77%** | 14 min |
+
+**3.7× the trainable parameters, +0.05 pp.** Same best epoch, same early stop.
+Refuted.
+
+The broader reading is what makes this worth keeping: `r`, `alpha` and target
+coverage are all **capacity** knobs, and tripling capacity changed nothing, so
+capacity is not what limits this task. That is the cleanest explanation for why
+the Optuna search bought nothing — it was searching capacity knobs almost
+exclusively. The one knob that ever mattered in this series was `lr`, and it
+mattered as a **stability threshold**, not a capacity setting: `lc_04` scores
+50% at 3e-4 and 93.4% at 1e-4. Threshold effects are exactly what a smooth
+sampler like TPE is worst at finding and what a subset study hides entirely.
 
 #### Liger kernel comparison (2026-07-28, `lc_0X_1_*_liger.py` vs plain runs above)
 
@@ -513,10 +741,11 @@ others use `temperature=0.1` (deterministic).
 | `lc_07_gemma2b_imdb_test.py` | `outputs/lora-gemma2-imdb` |
 | `lc_08_gemma9b_imdb_test.py` | `outputs/lora-gemma2-5-imdb` |
 | `lc_09_gemma12b_imdb_test.py` | `outputs/lora-gemma3-imdb` |
+| `lc_11_neobert_imdb_test.py` | `outputs/lora-neobert-imdb` |
 
 ```bash
-python lc_05_roberta_imdb_test.py     # best encoder
-python lc_06_modernbert_imdb_test.py  # new SOTA (Dec 2024)
+python lc_06_modernbert_imdb_test.py  # best result, 96.16%
+python lc_11_neobert_imdb_test.py     # 95.92% from 145M fewer params
 ```
 
 IMDB files print a full `classification_report` (precision/recall/F1 per class) and final accuracy.
@@ -526,6 +755,12 @@ adapter via `PeftModel.from_pretrained`, then run batched inference over the **f
 test set**. Do not load the adapter directory directly with `AutoModelForSequenceClassification`
 — it silently attaches a randomly initialized classification head (see "Final results"
 notes in section 2). Results: section 2, "Final results (2026-07-27)".
+
+`lc_11` additionally calls `patch_neobert()` from `lc_neobert_compat.py` on the base
+model **before** applying the adapter. This is not optional on the inference path:
+without it NeoBERT's `freqs_cis` buffer is uninitialized memory and a perfectly good
+adapter scores at chance, which reads as a corrupted save rather than a corrupted
+load. Section 2, "NeoBERT", has the details.
 
 ---
 
