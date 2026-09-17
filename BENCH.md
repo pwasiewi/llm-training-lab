@@ -95,12 +95,14 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 |---|---|---|---|---|---|---|
 | `gpt-oss20b-udq8kxl` (unsloth UD) | MoE 20.9B | Q8_K_XL, 12.29 GiB | whole (0) | ~193 | interp 3/3, regex 3/3 clean (bench_05); bench_07 ~50% PASS — lastline/evidence weakness shared with q8_0 (base-model trait) | **DEFAULT fast tier** |
 | `gpt-oss20b-q8_0` | MoE 20.9B | Q8_0, 12.11 GiB | whole (0) | ~214 | regex 57%, interp 71% (14+ runs); template never failed | fallback (superseded by udq8kxl, still fastest tg) |
-| `ornith-128k` (Ornith-1.0-35B) | qwen35moe A3B | Q4_K_M, 19.7 GiB | 24 | ~52 | regex never finishes (3/3 TIMEOUT @1200s); rest near-clean | **DEFAULT serious agentic** |
+| `ornith-128k` (Ornith-1.0-35B) | qwen35moe A3B | Q4_K_M, 19.7 GiB | 20 (floor 18, was 24 until 2026-09-17) | ~54 @49K depth | regex never finishes (3/3 TIMEOUT @1200s); rest near-clean | **DEFAULT serious agentic** |
 | `qwythos` (Qwythos-9B-v2 +MTP) | qwen35 dense hybrid | Q8_0 | whole | 149 (MTP) | parser tier FAILs (9B ceiling) | fast iteration on scoped tasks |
 | `ornith-9b` (Ornith-1.0-9B) | qwen35 dense | Q8_0, 9.53 GiB | whole | | interp 12/13 near-miss @900s; perf anti-pattern | accepted; judgment pending |
-| `qwen36-128k` (HauhauCS 35B-A3B) | qwen35moe | IQ4_XS, 17.43 GiB | 14–16 | ~82 | fastest template (118 s); insort-not-Fenwick on perf | general alternate |
+| `ornith15-9b` (Ornith-1.5-9B) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.0 GiB @128K) | 84 / 73 @49K | **11/12 first run** — interp 13/13, only regex TIMEOUT (2/14) | candidate for the fast tier (N=1; repeat ×3 + bench_07 pending) |
+| `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18) | ~53 @49K | **11/12 first run** — interp 13/13, regex TIMEOUT no file | candidate vs `ornith-128k` (N=1; repeat pending) |
+| `qwen36-128k` (HauhauCS 35B-A3B) | qwen35moe | IQ4_XS, 17.43 GiB | 16 (`--fit`: 16 + ffn_up) | ~82; 49K prompt 1850 pp / 75 tg | fastest template (118 s); insort-not-Fenwick on perf | general alternate |
 | `qwen36u-mxfp4-128k` (unsloth) | qwen35moe | MXFP4_MOE, 20.2 GiB | 16+ | | tied Ornith 7/8 | backup alternate |
-| `glm-flash` (GLM-4.7-Flash) | deepseek2 MoE 30B-A3B | Q4_K_XL, 17.5 GiB | 12 @32K / 24 @128K | 63 / 39.6 | 4/7 — gives up early on parser tier | 32K chat only |
+| `glm-flash` (GLM-4.7-Flash) | deepseek2 MoE 30B-A3B | Q4_K_XL, 17.5 GiB | 12 @32K / 22 @128K (was 24) | 63 / 42 | 4/7 — gives up early on parser tier | 32K chat only |
 | `dsv4flash` (Qwen3.5-9B-DSV4) | qwen35 dense | Q6_K | whole | ~93 | interp 0/13 — total parser failure | chat only, **NOT an agent** |
 | `gpt-oss20b` (MXFP4-Aggressive) | MoE 20.9B | MXFP4, 11.27 GiB | whole (0) | ~214 | never passed template+interp across runs | fallback/ref (superseded by Q8_0) |
 | `gpt-oss20b-f16` (unsloth F16) | MoE 20.9B | F16, 12.83 GiB | 2 | 2–6× slower | regex 6/14 | fallback for interp-style work |
@@ -115,6 +117,10 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 
 ### Per-model notes
 
+- **All `--n-cpu-moe` profiles carry `--load-mode none` since 2026-09-17**
+  (llama.cpp b11009): pp 1.6–3× on the CPU-resident experts, tg unchanged.
+  The tg figures in this table predate it and still hold; pp figures from
+  before that date are the mmap numbers — see "b11009 follow-ups".
 - **`gpt-oss20b-udq8kxl`** — the fast-tier default since 2026-07-19,
   superseding `gpt-oss20b-q8_0`. unsloth's UD (dynamic) Q8_K_XL quant —
   finer per-tensor treatment of non-expert tensors than plain Q8_0, 0.18
@@ -1846,3 +1852,305 @@ Takeaways:
   tensors only: 4–11× slower pp, ~30% slower tg, at 8× smaller context.
 - ik_llama.cpp warning: do not use `-rtr` with experts on CPU (kills pp);
   benchmark flag changes with `ik-llama-sweep-bench` before adopting them.
+
+## Literature — 2026-09-17: what the papers add to this log (from an aildr/Opus research run)
+
+Source: `~/Claude/ldr/reports/2026-09-17-0000-best-llm-models-and-techniques-for-16gb-cards.md`
+(Claude Opus driving local-deep-research over arXiv + SearXNG). Everything the
+report presents as "the frontier" is already measured above — MoE expert
+offload, MXFP4 vs Q8, dynamic quants, KV q8_0, MTP drafts — so this section
+keeps only what the log did NOT have: the papers behind the knobs, read in full
+where it mattered, and what each one changes for this box.
+
+| Paper | What it establishes | Consequence here |
+|---|---|---|
+| SpecMoEOff, arXiv:2508.21706 | Speculative decoding pays off MOST when experts are offloaded: the GPU idles while expert weights stream over PCIe, and draft tokens raise the work per expert load. Throughput peaks at 5–6 draft tokens, then falls (CPU attention cost). EAGLE draft < 2 GB. Tested only on Mixtral-8x7B, A30 / 4090D, 190–250 GB RAM. | Our MTP drafts were only ever measured on a model that fits whole (Qwythos). The offloaded profiles (`qwen36-128k` ncmoe 16, `ornith-128k` 24, `glm-flash-128k` 24) are exactly the paper's regime and have no drafter — the MTP variants in the to-try list should be benchmarked THERE first. `bench_08_spec_offload.sh` sweeps `--spec-draft-n-max` with `NCMOE=` for that. |
+| ATSInfer, arXiv:2607.10183 | Per-TENSOR placement (knapsack on measured cost per byte) beats per-layer: up to 3.29× decode and 1.94× prefill vs llama.cpp on an RTX 3060 6 GB with GPT-OSS-20B and Qwen3-30B-A3B; plus runtime re-planning when CPU speed drifts >15%. 15k lines of C++, not a flag. | The re-planning is out of reach, but the placement granularity is not: `--override-tensor` moves single expert tensors, `--n-cpu-moe` moves three per layer. `bench_09_ot_halfstep.sh` probes the 1/3 and 2/3 steps between two ncmoe values (`ffn_down_exps` alone, or `ffn_up`+`ffn_gate`), and `-f` shows what the new `--fit on` chooses against the hand-found floors. |
+| Quantization meets reasoning, arXiv:2505.11574 (+2501.03035) | 4-bit weight-only is NOT safe for hard reasoning: MATH −15 pp average at W4A16, small models catastrophic (Qwen2.5-0.5B −38…−70 pp), 7B only −2…−3 pp. Errors are execution/method errors, not concept errors. W8A8 preserves far more. Repair: locate the first wrong step, 332 curated examples, 3–5 min of DPO → back near fp16. | Matches the log's own finding that Q4 breaks the gpt-oss router while Q8 does not, and the parser-tier failures of the IQ4_XS 35B MoEs. Judge quants on the hard tiers (interp/regex), never on chat. The DPO repair is a cheap experiment for `grpo_11`-style pipelines after quantising a trained model. |
+| Parameter efficiency ≠ memory efficiency, arXiv:2604.22783 | In LoRA fine-tuning the peak is activation memory O(B·S·H·L), not optimizer state; checkpointing and FlashAttention shave constants only. Sequence length is the ceiling; their LARS pooling cuts ~33% at equal accuracy. | Explains why `lc_09` (gemma-12B, 4-bit, r=32) tops out on batch size at max_length 128 and why `grpo_11` is governed by `max_completion_length`. The lever that matters is S, not r. |
+| Ladder side nets, arXiv:2512.14237 | Train a side network on frozen backbone activations, no backprop through the backbone: about half of QLoRA's peak memory, MATH-500 68.9 vs 70.4 for QLoRA on Qwen2.5-7B. RL/GRPO integration explicitly unsolved. | Candidate for the SFT classifiers (`lc_07`–`lc_09`) if a 12B run at longer sequences is ever needed; useless for the GRPO series. |
+| WKVQuant 2402.12065, AnTKV 2506.19505 | Quantising weights AND KV cache together is where the memory goes; sub-4-bit KV needs anchor-token tricks to stay accurate. | Keeps `-ctk/-ctv q8_0` as the floor for the reasoning profiles; a `q4_0` KV trial only buys ncmoe room and must be scored on bench_05, not on tg. |
+| PIPO 2504.03664, ExpertFlow 2410.17954, MoBiLE 2510.12357, HGCA 2507.03153 | Pipelined transfer/compute overlap (GPU util <40% → >90% on a 6 GB laptop card), predicted expert caching, big-little expert pairs, CPU-side attention for long context. | Research systems, not llama.cpp features; recorded so the next "why is pp slow with ncmoe 24" question has the references. |
+
+### Measured the same day: MTP draft length on Qwythos-9B-v2 (dense, whole in VRAM)
+
+`bench_08_spec_offload.sh`, ctx 32K, q8_0 KV, greedy, 384 generated tokens,
+384-token coding prompt (server timings):
+
+| `--spec-draft-n-max` | tg | acceptance | note |
+|---|---|---|---|
+| none | 85.2 tok/s | — | baseline |
+| 3 (default) | 138.7 tok/s | 236/437 = 54 %, mean run 2.6 | **best** |
+| 5 | 133.9 tok/s | 260/608 = 43 %, mean run 3.1 | more drafts rejected |
+| 3, short prompt | 173 tok/s | 78 % | acceptance is prompt-dependent |
+| 3, temp 0.7, short prompt | 150 tok/s | 62 % | sampling lowers acceptance |
+| 5 + `--spec-draft-p-min 0.5` | 161 / 147 tok/s (greedy / 0.7) | | p-min trims the bad drafts |
+
+On a dense model that fits, the paper's 5–6 is NOT the optimum: the default 3
+wins, because every extra draft token here costs target compute, not idle
+time. The paper's regime is the offloaded MoE — re-run with `NCMOE=` on an
+MTP-capable 35B build before touching the `qwythos` profile. Nothing in
+`models.conf` changed.
+
+### Traps found while measuring (fixed in the scripts)
+
+- **Port 8090 is the LAN ntfy server** and it answers `/health` with 200 — the
+  bench scripts still defaulted to it from before ntfy existed, so a sweep
+  "started" fine, posted its prompt into an ntfy topic and reported ntfy's
+  reply. Defaults moved to 8095 in `bench_01/04/06/08/09`; the new scripts
+  refuse a port that is already listening.
+- **Backgrounding via `eval … &` kills the wrong process:** `$!` is the
+  subshell, `kill $!` leaves the llama-server orphaned with 10 GB of VRAM, the
+  next server cannot bind the port, and every later row measures the first
+  server — five identical 85 tok/s rows. Use an args array and run the binary
+  directly.
+
+### 2026-09-17 01:10 — updated to b11009 (0.4.1-dev), host + amdkdehard + nvidiahard
+
+`--fit on` probe (`bench_09_ot_halfstep.sh -f`, qwen36 IQ4_XS, ctx 131072, q8_0 KV,
+target 512 MiB free) landed on **41 layers on CUDA0 with 16 overflowing to the CPU,
+plus a fractional step: the `ffn_up` of one more layer** (`overflow_type=UP`, then
+GATE tried and rejected) — 13 465 MiB used, 649 MiB free. That is the hand-found
+`ncmoe 16` of the `qwen36-128k` profile, found automatically in 3 s, and the new
+build already does the per-tensor fraction that bench_09's HALF sweep was written
+to probe. Keep bench_09 -b for comparing tg between the two, but the floor search
+itself is now `--fit`. MTP on Qwythos unchanged after the update (134 tok/s at
+n-max 3, 51 % acceptance, 84 baseline).
+
+New warning worth a benchmark: *"tensor overrides to CPU are used with mmap
+enabled — consider using `--load-mode none` for better performance"*. Every ncmoe
+profile triggers it. Try `EXTRA_SERVER_ARGS="--load-mode none" bench_01_llamacpp.sh -s`
+on qwen36-128k and ornith-128k before adding it to models.conf.
+
+### 2026-09-17 04:20–04:40 — b11009 follow-ups: `--load-mode none` doubles pp on every offload profile; `--fit` vs the hand floors; MTP on an offloaded MoE is a loss
+
+**1. `--load-mode none` (no mmap) — adopted in every `--n-cpu-moe` profile.**
+`bench_01_llamacpp.sh -s`, 1.1K-token prompt, 256 generated, ctx 131072, q8_0 KV,
+two passes for qwen36 (first / second):
+
+| profile | ncmoe | pp mmap (default) | pp `--load-mode none` | tg mmap | tg none |
+|---|---|---|---|---|---|
+| `qwen36-128k` | 16 | 707 / 770 | **1386 / 1293** | 73.4 / 78.6 | 77.0 / 78.6 |
+| `ornith-128k` | 24 | 467 | **769** | 54.2 | 53.3 |
+| `glm-flash-128k` | 24 | 353 | **1090** | 42.5 | 41.7 |
+
+llama-bench, qwen36 ncmoe 16: pp512 802 ± 28 → **1818 ± 46** (2.27×), tg128 82.0 → 81.3.
+The build's own warning ("tensor overrides to CPU are used with mmap enabled —
+consider `--load-mode none`") was right: the CPU-resident experts are read through
+file-backed page-cache mappings under mmap; with `none` they are copied into
+anonymous memory once at load. Decode is single-token and bandwidth-bound either
+way, prompt batches hammer the expert matmuls and pay the mapping overhead. Cost:
++5–10 s load (the copy; more when the page cache is cold), and the CPU part of the
+model lives twice in RAM (anonymous + page cache) — irrelevant at 64 GB. Applied to
+all 12 ncmoe profiles in `~/.aillama/models.conf` and the built-ins in `bin/aillama`.
+Whole-in-VRAM profiles (gpt-oss, 9B dense) are untouched: nothing of theirs is on
+the CPU.
+
+**2. `--fit on` vs the hand floors** (`bench_09_ot_halfstep.sh -f`, ctx 131072,
+`--fit-target 512`, ~0.5 GB desktop VRAM):
+
+| profile | hand floor / profile value | `--fit` chose | free after fit |
+|---|---|---|---|
+| `qwen36-128k` | 16 / 16 | 41 layers, 16 overflowing + `UP` of one more | 649 MiB |
+| `qwen36u-mxfp4-128k` | 16 @32K / 23 | 18 overflowing + `UP` | 611 MiB |
+| `ornith-128k` | 18 / 24 | 17 overflowing + `GATE` | 516 MiB |
+| `glm-flash-128k` | 22 (20 aborted) / 24 | 19 overflowing + `ATTN` | 596 MiB |
+| `gpt-oss20b-f16` | 2 (1 OOMed) / 2 | nothing offloaded, "no changes needed" | 1036 MiB |
+
+The hand floors were found with 0.9–1.8 GB of desktop VRAM in use; `--fit` sees
+~0.5 GB today, hence the lower numbers — it is a measurement of the moment, not a
+new floor (its own log says so: re-run with the real desktop load). Its fractional
+step is cheap: bench_09 -b on qwen36 ncmoe 16 — none pp 802 / tg 82.0; + `ffn_up`
+of layer 16: 815 / 81.0; + `ffn_down`: 813 / 79.9 — about 1.3 % tg for a third of
+a layer, the same per-tensor rate as a whole layer.
+
+Real 49K-token request at the `--fit` placement (qwen36, 16 + UP, `--load-mode
+none`, ctx 131072): prompt 49 216 tokens at **1833 / 1853 tok/s**, tg **75.1 tok/s
+at 49K depth**, VRAM 15.25 → 15.36 GiB of 16.3 across two requests, no OOM. That
+is the number to quote for "how fast is a real long prompt on this box".
+
+**3. MTP on an offloaded MoE — the SpecMoEOff regime, measured: a loss.**
+Nemotron-3.5-Lightning-30B-A3B Q4_0 + ggml-org's separate `mtp-*.gguf` (19
+tensors: `token_embd`, `output`, block 52 = the MTP head; loads with
+`-md mtp.gguf --spec-type draft-mtp`, server log "loading draft model"), ncmoe 18,
+ctx 32K, `--load-mode none`, greedy, 384 tokens, `bench_08_spec_offload.sh`:
+
+| `--spec-draft-n-max` | tg | acceptance |
+|---|---|---|
+| none | 71.4 / 71.3 tok/s | — |
+| 3 | 66.5 / 66.0 | 52 %, mean run 2.55 |
+| 5 | 51.6 / 52.2 | 33 %, mean run 2.65 |
+
+The paper's gain assumes experts *streamed* over PCIe per token, so the GPU idles
+and verifying k+1 tokens costs nothing extra. Here the offloaded experts are
+resident in RAM and computed on 16 CPU threads: verifying a 4-token batch through
+CPU experts costs close to 4× a single token (compute-bound, not bandwidth-bound),
+which eats the whole draft win. The 2026-08-18 "unused reserve" of the nemotron
+`mtp-*.gguf` is closed — do **not** add `--spec-type draft-mtp` to an ncmoe
+profile. MTP stays a whole-in-VRAM win (`qwythos`, n-max 3).
+
+n-gram drafter (`--spec-type ngram-mod`, model-free, qwen36 ncmoe 16): first
+request has nothing to draft from (78.5 tok/s = baseline), the *identical* second
+request runs at 99.3 tok/s (56 % accepted, mean run 35.8 tokens) because the
+drafter replays its own history. It pays only when the output repeats earlier
+context (re-emitting a file after an edit, long tool-output echo) — a use-case
+note, not a ranking number. `bench_08` now treats `ngram-*` types as one row
+(`DRAFT_LIST=0,1`), since `--spec-draft-n-max` is not their knob.
+
+**4. Lower floors from `--fit`, checked with the 49K request, and bench_05 on the
+Gated-DeltaNet models after the #28068 normalisation fix** — see the next entry.
+
+## HF sweep — 2026-09-17: Ornith 1.5 family is the candidate that matters; 27B-dense and >100B releases are out by rule
+
+Done while bench_05 ran (HF API: trending + most-downloaded GGUF repos created
+since 2026-07-28, plus targeted searches; sizes from `?blobs=true`). The 16 GB /
+64 GB rules from the fleet table apply up front: MoE A3B class ≤ ~21 GiB at Q4
+(offload), or a whole-fit file ≤ ~13 GiB at 128K; no dense 27B; nothing whose
+Q4 does not fit in RAM.
+
+**Worth benching (in this order):**
+
+1. **`ornith-ai/Ornith-1.5-35B-A3B-GGUF`** (2026-08-18, 4.4 M downloads,
+   `qwen35moe`, native ctx 262 144) — the successor of the serious-agentic
+   default. Q4_K_M 20.22 GiB = the same shape as Ornith-1.0 Q4_K_M (19.7 GiB,
+   floor 18 @128K, profile 20 since today). Card: self-improvement loop expanded
+   from Ornith-1.0; Terminal-Bench 2.1, SWE-Bench Verified/Pro/Multilingual,
+   MCP-Atlas, Toolathlon numbers on the card; `qwen3_coder` tool-call format
+   (works with qwen-code). The direct A/B against `ornith-128k` on bench_05 +
+   bench_07 is the single most valuable run in this list.
+2. **`peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF`** (2026-08-19, 415 K, base =
+   Ornith-1.5-35B-A3B, `qwen35moe`) — a coder finetune + unsloth-style dynamic
+   requant; UD-IQ4_XS 16.51 GiB (lower floor than Q4_K_M — but remember the
+   qwen36 UD-IQ4_XS lesson: it was the uniquely failing quant there), UD-Q4_K_XL
+   20.82 GiB. Card claims SWE-bench-Live 12/25 vs Ornith-1.5's 8/25 and
+   Claw-Eval 67.2 vs 65.3, self-reported. `Cyber-Tiel-Coder` (09-08) is its
+   uncensored sibling. Ships a 1.39 GiB `mtp-*.gguf` — irrelevant here (see
+   "b11009 follow-ups": MTP loses on an offloaded MoE).
+3. **`ornith-ai/Ornith-1.5-9B-GGUF`** (2026-08-19, 5.3 M, `qwen35` dense) —
+   successor of `ornith-9b`; Q8_0 9.11 GiB fits whole at 128K like Qwythos.
+   Fast-tier challenger to `qwythos` / `gpt-oss20b-udq8kxl`.
+4. **`empero-ai/Qwen3.8-9B-Distill-GGUF`** (2026-08-15, 699 K, `qwen35` dense,
+   Q8_0 9.11 GiB) — Qwen3.8-27B distilled into the 9B shape; same class as 3,
+   bench whichever of the two wins first against the other.
+5. `DevQuasar/amd.Instella-MoE-16B-A3B-Think-GGUF` (`instella-moe`, native ctx
+   32 768 only, Q6_K 13.2 GiB whole) and the July `tvall43/Qwen3.6-14B-A3B-
+   FableVibes-GGUF` (Q8_0 13.65 GiB whole) — the "MoE that fits whole" shelf;
+   curiosity tier, after 1–4.
+
+**Out by rule (no download):** the whole Qwen3.8-27B GGUF wave (unsloth 8.9 M,
+HauhauCS-MTP, DavidAU TURBO/TWIN-TURBO, ISTA-DASLab GSQ, Bucoid "16GB-VRAM" IQ4_XS-
+MTP, z-lab DFlash2, Jackrong Qwopus3.8, cdiamond NVFP4-MTP …) — dense 27B, the
+2026-08-18 `qwen38` result (4.5 t/s, 0/8) already settled the class; a drafter
+does not fix partial-offload decode of a dense model, and the "16 GB VRAM" quants
+leave no room for a 128K KV. `unsloth/Qwen3.8-Flash-Next` (`qwen4exp`, 177 B
+total), `unsloth/GLM-5.3-Flash` (`glm5next`, 321 B), `DeepSeek-V4.1-Flash` (755 B,
+Q2 = 341 GiB), `Ling-3.0-flash` (124 B), `Muse-Glimmer-30B` (dense 28 B + vision),
+`MiniMax-H3` (odd pruned 20 B files), `Nemotron-3-Nano-30B-A3B` (older sibling of
+the tested 3.5 Lightning). Still nothing new for the eagle3 draft of gpt-oss-20b
+(RedHatAI repo untouched since 04-08, safetensors only).
+
+**July list, re-checked:** all eight repos still exist. `unsloth/Ornith-1.0-35B-
+GGUF` UD-IQ4_XS is superseded by Ornith 1.5; the three MTP variants
+(Ornith-MTP-APEX, qwen36-MTP, dsv4flash-MTP) are dropped after today's measurement
+(35B MoE = offloaded = MTP loses; dsv4flash is chat-only anyway).
+`Ternary-Bonsai-27B` stays a curiosity (6.7 GiB ternary, updated 08-31).
+
+**Blocker before any download: `/mnt/db1` has 30 GB free (95 %).** Ornith-1.5-35B
+Q4_K_M + Ornith-1.5-9B Q8_0 need 29.3 GiB. Rejected files still on disk under
+`~/models` (= `/mnt/db1/huggingface/models`): `gemma4-12B-fable5` 12 G,
+`gemma4-12b-q8_0` 12 G, `gemma4-12b-qat` (hub blob 7.4 G), `gpt-oss-20b-heretic`
+(hub blob 12.6 G), `gpt-oss-20b-neoplus` 12 G (never profiled), `qwen35-9b-
+dsv4flash` 6.9 G (chat-only) — ~56 GB if all six go. Nothing was deleted; the
+choice is yours.
+
+### 2026-09-17 04:38–07:00 — lower floors verified, profiles changed; bench_05 on the Gated-DeltaNet models after b11009; Ornith 1.5 first boot
+
+**Floors from `--fit`, checked with a real 49K-token request** (ctx 131072,
+`--load-mode none`, `n_predict` 256, greedy; VRAM after the request):
+
+| profile | ncmoe | VRAM after request | pp @49K | tg @49K depth | verdict |
+|---|---|---|---|---|---|
+| ornith-128k | 20 | 13.62 GiB | 1478 | 54.4 | **new profile value** (was 24) |
+| ornith-128k | 18 | 14.55 GiB | 1602 | 57.1 | = hand floor, 1.75 GB left |
+| glm-flash-128k | 22 | 14.51 GiB | 956 (41K tok) | 32.8 | **new profile value** (was 24) |
+| glm-flash-128k | 20 | 15.15 GiB | 982 | 33.9 | boots and serves now (aborted in July) — 1.1 GB left, too tight |
+| ornith15-128k (Ornith-1.5-35B Q4_K_M) | 20 | 13.84 GiB | 1416 | 52.7 | same shape as 1.0 — profile at 20 |
+| ornith15-128k | 18 | 14.77 GiB | 1530 | 56.7 | floor confirmed |
+
+floor + 2 everywhere, with ≥ 1.8 GB for the desktop. The July "20 aborts at boot"
+for GLM was a build + desktop-VRAM artefact (the skill already says floors drift
+per build). tg at 49K depth is within 5 % of the 1K-prompt figures.
+
+**bench_05 after the GDN normalisation fix (#28068), `TASK_TIMEOUT=900`,
+`--load-mode none` profiles, ornith at ncmoe 20** — one run each, so per the
+house rule this is a regression check, not a ranking:
+
+| task | qwythos | qwen36-128k | ornith-128k |
+|---|---|---|---|
+| bugfix | PASS 4/4 13 s | PASS 4/4 34 s | PASS 4/4 44 s |
+| scratch | PASS 33 s | PASS 15/15 145 s | PASS 7/7 79 s |
+| lru | PASS 18 s | PASS 40 s | PASS 43 s |
+| multifile | PASS 33 s | PASS 50 s | PASS 70 s |
+| intervals | PASS 66 s | PASS 34 s | PASS 86 s |
+| fsm | PASS 20 s | PASS 43 s | PASS 47 s |
+| codec | FAIL 16 s — file not created | PASS 37 s | PASS 60 s |
+| toposort | PASS 16 s | PASS 40 s | PASS 60 s |
+| template | FAIL 0/10 481 s | TIMEOUT 5/10 | PASS 10/10 238 s |
+| interp | FAIL 0/13 634 s | TIMEOUT 10/13 (76 %) | TIMEOUT 11/13 (84 %) |
+| perf | PASS 37 s | PASS 39 s | PASS 101 s |
+| regex | FAIL — used re | TIMEOUT 10/14 (71 %) | TIMEOUT 10/14 (71 %) |
+| **PASS** | **8/12** | **8/12** | **10/12** |
+
+Reading: no regression anywhere on the easy/mid tier (24/24 clean across the
+three). `ornith-128k` at ncmoe 20 with mmap off behaves exactly as its July
+profile (template PASS, interp scored-but-late, regex never converges — the
+documented signature), so the profile change stands. `qwythos` keeps its
+parser-tier wall (all four FAIL, two of them instant — the 9B does not attempt
+the file). `qwen36-128k` now TIMEOUTs template at 5/10 where it once was "the
+fastest template (118 s)"; that is one run against N≈3 historical runs — flag
+for a repeat, not a verdict. Nothing here says the GDN fix changed a verdict in
+either direction; it did not break anything, which was the question.
+
+**Ornith 1.5 (downloaded 05:23–05:33 after space was freed):** `ornith15-128k`
+(35B Q4_K_M 20.22 GiB, ncmoe 20) and `ornith15-9b` (Q8_0 9.11 GiB, whole at
+128K) are in models.conf; bench_05 on both is running — next entry.
+
+### 2026-09-17 07:00–08:40 — Ornith 1.5: both sizes 11/12 on the first run; the 9B is the news
+
+`bench_05_agentic.sh`, `TASK_TIMEOUT=900`, `WORKROOT=/tmp/bench-agentic-ornith15`,
+llama.cpp b11009, one run each (regression-check rules apply: N=1 does not rank).
+
+| task | `ornith15-9b` (Q8_0 9.11 GiB, whole @128K) | `ornith15-128k` (Q4_K_M 20.22 GiB, ncmoe 20, mmap off) |
+|---|---|---|
+| bugfix | PASS 4/4 22 s | PASS 4/4 44 s |
+| scratch | PASS 6/6 84 s | PASS 6/6 125 s |
+| lru | PASS 65 s | PASS 84 s |
+| multifile | PASS 123 s | PASS 100 s |
+| intervals | PASS 65 s | PASS 112 s |
+| fsm | PASS 69 s | PASS 70 s |
+| codec | PASS 58 s | PASS 82 s |
+| toposort | PASS 60 s | PASS 47 s |
+| template | PASS 10/10 488 s | PASS 10/10 319 s |
+| interp | **PASS 13/13 312 s** | **PASS 13/13 275 s** |
+| perf | PASS 616 s | PASS 375 s |
+| regex | TIMEOUT 2/14 | TIMEOUT, no file |
+| **PASS** | **11/12** | **11/12** |
+
+Same day, same harness, same budget: `ornith-128k` (1.0) 10/12, `qwen36-128k` 8/12,
+`qwythos` 8/12 — and no 9B in this log had ever passed `interp` (Qwythos 0/13,
+dsv4flash 0/13, ornith-9b 12/13 near-miss at 900 s). `regex` stays the family's
+wall (Ornith 1.0 never converged either; the 9B at least left 2/14).
+
+Throughput, `ornith15-9b` alone on the GPU, ctx 131072, q8_0 KV, greedy, 256 out:
+12.0 GiB after load (fits whole with 4 GB spare), **pp 4235 / tg 84.1 tok/s** on an
+836-token prompt, **pp 4491 / tg 72.7 at 49K depth**. `ornith15-128k`: 13.84 GiB
+at ncmoe 20, pp 1416 / tg 52.7 at 49K depth (see the floor table above) — the 35B
+buys nothing over the 9B on this suite at 0.63× the speed.
+
+**What changes:** nothing in the DEFAULT column yet (house rule, N≥20 before a
+ranking claim), but the queue order is set: (1) `ornith15-9b` ×3 on the parser
+tier + bench_07 `RUNS=10` against `gpt-oss20b-udq8kxl` — if it holds ~11/12 it
+takes the fast tier and Qwythos retires; (2) `ornith15-128k` ×3 vs `ornith-128k`
+— if it holds, Ornith 1.0 retires and 19.7 GB come back. Tiel-Coder (the coder
+finetune of this base) only matters if (2) holds. The Ornith 1.5 profiles are in
+`models.conf` with today's numbers in their comments.
