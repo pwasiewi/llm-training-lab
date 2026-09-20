@@ -93,14 +93,17 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 
 | Profile / model | Arch | Quant, file size | Fit @128K (`--n-cpu-moe`) | tg tok/s | bench_05 weak spots | Status / role |
 |---|---|---|---|---|---|---|
-| `gpt-oss20b-udq8kxl` (unsloth UD) | MoE 20.9B | Q8_K_XL, 12.29 GiB | whole (0) | ~193 | interp 3/3, regex 3/3 clean (bench_05); bench_07 ~50% PASS — lastline/evidence weakness shared with q8_0 (base-model trait) | **DEFAULT fast tier** |
+| `gpt-oss20b-udq8kxl` (unsloth UD) | MoE 20.9B | Q8_K_XL, 12.29 GiB | whole (0) | ~193 | interp 3/3, regex 3/3 clean (bench_05); bench_07 11/20 again on 2026-09-19 (lastline 12/20, evidence 12/20 — base-model trait, stable since July) | **DEFAULT fast coding tier** (only fleet member that passes regex; 22–43 s per bench_07 run) |
 | `gpt-oss20b-q8_0` | MoE 20.9B | Q8_0, 12.11 GiB | whole (0) | ~214 | regex 57%, interp 71% (14+ runs); template never failed | fallback (superseded by udq8kxl, still fastest tg) |
-| `ornith-128k` (Ornith-1.0-35B) | qwen35moe A3B | Q4_K_M, 19.7 GiB | 20 (floor 18, was 24 until 2026-09-17) | ~54 @49K depth | regex never finishes (3/3 TIMEOUT @1200s); rest near-clean | **DEFAULT serious agentic** |
-| `qwythos` (Qwythos-9B-v2 +MTP) | qwen35 dense hybrid | Q8_0 | whole | 149 (MTP) | parser tier FAILs (9B ceiling) | fast iteration on scoped tasks |
+| `ornith-128k` (Ornith-1.0-35B) | qwen35moe A3B | Q4_K_M, 19.7 GiB | 20 (floor 18, was 24 until 2026-09-17) | ~54 @49K depth | regex never finishes (7/7 TIMEOUT); interp 2/4 at 900 s in the 2026-09-19 pairing | superseded by `ornith15-128k` (2026-09-19) — 20 GB hub blob, delete candidate |
+| `qwythos` (Qwythos-9B-v2 +MTP) | qwen35 dense hybrid | Q8_0 | whole | 149 (MTP) | parser tier FAILs (9B ceiling); Xid 8 hang @69K with MTP | **RETIRED 2026-09-19** — dominated by `ornith15-9b` (same size, passes interp/perf, 95 % workflow); 18 GB (two files), delete candidate |
 | `ornith-9b` (Ornith-1.0-9B) | qwen35 dense | Q8_0, 9.53 GiB | whole | | interp 12/13 near-miss @900s; perf anti-pattern | accepted; judgment pending |
-| `ornith15-9b` (Ornith-1.5-9B) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.0 GiB @128K) | 84 / 73 @49K | **11/12 first run** — interp 13/13, only regex TIMEOUT (2/14) | candidate for the fast tier (N=1; repeat ×3 + bench_07 pending) |
-| `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18) | ~53 @49K | **11/12 first run** — interp 13/13, regex TIMEOUT no file | candidate vs `ornith-128k` (N=1; repeat pending) |
-| `qwen36-128k` (HauhauCS 35B-A3B) | qwen35moe | IQ4_XS, 17.43 GiB | 16 (`--fit`: 16 + ffn_up) | ~82; 49K prompt 1850 pp / 75 tg | fastest template (118 s); insort-not-Fenwick on perf | general alternate |
+| `ornith15-9b` (Ornith-1.5-9B) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.0 GiB @128K) | 84 / 73 @49K | @900 s N=4: interp 13/13 scored every run but 3/4 by verdict, template 2/4, perf 3/4; **@1200 s N=3: template/interp/perf 3/3 each = 11/12 every run**, regex 0/3 (12/14 once). **bench_07 19/20 PASS** (every axis 20/20, evidence 19/20) | **DEFAULT workflow agent** (rule-heavy multi-step qwen-code jobs, whole-fit); with `TASK_TIMEOUT=1200` also a full coding agent minus regex; udq8kxl keeps the sprint tier (regex, 2.3× tg) |
+| `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18) | ~53 @49K | parser tier N=7: template/interp/perf 7/7 each; **regex 2/7 PASS** (744 s and 670 s on 09-19 — first non-gpt-oss regex passes in this log; 14/14 scored-but-late once, 5/14 once) | **DEFAULT serious agentic** (2026-09-19; beats Ornith 1.0 on interp, same VRAM shape and speed; Tiel-Coder tied it at N=3) |
+| `tiel-128k` (Tiel-Coder-35B-A3B, coder finetune of the Ornith 1.5 base) | qwen35moe | UD-Q4_K_XL, 20.82 GiB | 21 (14.4 GiB after a 51K request) | 50 @51K depth, pp 1885 | parser tier N=3: template/interp/perf 3/3 each, regex 1/3 PASS (340 s = fastest regex pass ever, then 2× TIMEOUT no file) | tied with `ornith15-128k` at N=3 — no measurable coder-finetune edge; 21 GB kept only as an alternate, delete candidate |
+| `qwen38d-9b` (Qwen3.8-9B-Distill, empero-ai) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.3 GiB @128K) | 71 @51K depth, pp 4429 | template FAIL 3/3 (1–4/10), interp 0/3 (9/13 then 0/13 ×2), regex 0/3, perf 3/3 (46 s); **bench_07 1/20** — `summary` 5/20 (riffs Euler/numerics off the project name), evidence 10/20, lastline 12/20 | **REJECTED** — a 9B that hallucinates from names and cannot hold a parser task; delete candidate |
+| `qwen38d-128k` (Qwen3.8-35B-A3B-Distill, empero-ai) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (14.1 GiB after a 51K request) | 53 @51K depth, pp 1865 | full suite ×3: easy/mid 24/24 clean and fast; template 2/3, interp 2/3, perf 3/3, regex 0/3 (11/14 once) → 11, 9, 11 of 12; **bench_07 15/20** (lastline 16, evidence 16, summary 19 — no hallucination trait) | accepted — general alternate, stronger than its base `qwen36-128k` on the parser tier and on bench_07 (udq8kxl 11/20), below `ornith15-128k` (regex, interp 3/3) at the same speed |
+| `qwen36-128k` (HauhauCS 35B-A3B) | qwen35moe | IQ4_XS, 17.43 GiB | 16 (`--fit`: 16 + ffn_up) | ~82; 49K prompt 1850 pp / 75 tg | fastest template (118 s); insort-not-Fenwick on perf; 8/12 on 09-17 | general alternate — the speed pick (tg ~82); its distill `qwen38d-128k` is stronger at tg ~53 |
 | `qwen36u-mxfp4-128k` (unsloth) | qwen35moe | MXFP4_MOE, 20.2 GiB | 16+ | | tied Ornith 7/8 | backup alternate |
 | `glm-flash` (GLM-4.7-Flash) | deepseek2 MoE 30B-A3B | Q4_K_XL, 17.5 GiB | 12 @32K / 22 @128K (was 24) | 63 / 42 | 4/7 — gives up early on parser tier | 32K chat only |
 | `dsv4flash` (Qwen3.5-9B-DSV4) | qwen35 dense | Q6_K | whole | ~93 | interp 0/13 — total parser failure | chat only, **NOT an agent** |
@@ -2154,3 +2157,207 @@ takes the fast tier and Qwythos retires; (2) `ornith15-128k` ×3 vs `ornith-128k
 — if it holds, Ornith 1.0 retires and 19.7 GB come back. Tiel-Coder (the coder
 finetune of this base) only matters if (2) holds. The Ornith 1.5 profiles are in
 `models.conf` with today's numbers in their comments.
+
+## Reference results — 2026-09-19: the Ornith 1.5 queue — parser tier ×3 paired with Ornith 1.0, then bench_07 RUNS=20 vs gpt-oss20b-udq8kxl
+
+```
+# /var/tmp/bench-o15-queue.sh, log /var/tmp/bench-o15-queue-2026-09-18.log, 21:25 → 03:59
+for i in 1 2 3; do MODELS=ornith15-9b,ornith15-128k,ornith-128k TASKS=template,interp,perf,regex \
+  TASK_TIMEOUT=900 WORKROOT=/tmp/bench-o15-parser-run$i ./bench_05_agentic.sh; done
+MODELS=ornith15-9b,gpt-oss20b-udq8kxl RUNS=20 WORKROOT=/tmp/bench-wf-o15 ./bench_07_workflow.sh
+```
+
+The queue set on 09-17 (N=1 does not rank). Only the parser tier repeats — the
+easy/mid tier was 8/8 for all three the day before and discriminates nothing at
+the top of the fleet. `ornith-128k` (Ornith 1.0) runs in the same pass as a paired
+control instead of leaning on July numbers. bench_07 at `RUNS=20`, not the 10
+written in the queue: N=10 already produced one false verdict in July. llama.cpp
+b11009 throughout, ~1 h 50 per parser pass, bench_07 47 min for the 9B and 10 min
+for udq8kxl.
+
+**Parser tier, four runs per model (09-17 first run + tonight's three):** verdict,
+`score` where the verdict is not a clean PASS, wall-clock seconds.
+
+| task | `ornith15-9b` | `ornith15-128k` | `ornith-128k` (1.0) |
+|---|---|---|---|
+| template | PASS 488 · TIMEOUT – · TIMEOUT 6/10 · PASS 888 → **2/4** | PASS 319 · 216 · 162 · 326 → **4/4** | PASS 238 · 119 · 271 · 421 → **4/4** |
+| interp | PASS 312 · PASS 341 · TIMEOUT 13/13 · PASS 628 → **3/4** (13/13 scored in all four) | PASS 275 · 467 · 376 · 404 → **4/4** | TIMEOUT 11/13 · TIMEOUT 12/13 · PASS 256 · PASS 358 → **2/4** |
+| perf | PASS 616 · PASS 541 · TIMEOUT 5/6 · PASS 358 → **3/4** | PASS 375 · 132 · 322 · 178 → **4/4** | PASS 101 · 146 · 89 · 108 → **4/4** |
+| regex | TIMEOUT 2/14 · – · – · – → **0/4** | TIMEOUT no file · – · 11/14 · 14/14 → **0/4** | TIMEOUT 10/14 · 5/14 · 12/14 · – → **0/4** |
+| parser verdicts | 3, 2, 0, 3 of 4 | **3, 3, 3, 3 of 4** | 2, 2, 3, 3 of 4 |
+
+**bench_07 `relmeta`, RUNS=20:**
+
+| model | PASS | lastline | evidence | license | summary | order | other 5 items | s/run |
+|---|---|---|---|---|---|---|---|---|
+| `ornith15-9b` | **19/20 (95 %)** | 20/20 | 19/20 | 20/20 | 20/20 | 20/20 | 20/20 | 92–222 |
+| `gpt-oss20b-udq8kxl` | 11/20 (55 %) | 12/20 | 12/20 | 18/20 | 19/20 | 19/20 | 20/20 | 22–43 |
+
+udq8kxl reproduces its July RUNS=20 result to the run (11/20 then, 11/20 now), with
+the same `lastline,evidence` pair as the dominant FAIL signature — the base-model
+trait is stable across two llama.cpp builds and two months. The 9B's single miss
+was an `evidence` slip with everything else held.
+
+**Reading.**
+
+1. **`ornith15-128k` takes the serious-agentic role from Ornith 1.0.** Same file
+   shape (20.22 vs 19.7 GiB), same floor (18) and speed (~53 tok/s at 49K depth),
+   and 11/12 held on all four runs; the one task where the two differ is `interp`
+   (4/4 vs 2/4 at 900 s — Ornith 1.0 scores 11–12/13 and runs out of time). regex is
+   the family wall for both, but the 1.5 reached 14/14 scored inside the budget once
+   (still TIMEOUT: it kept verifying instead of stopping). The pre-set rule held →
+   Ornith 1.0 35B retires (20 GB hub blob under `models--deepreinforce-ai--Ornith-1.0-35B-GGUF`).
+2. **`ornith15-9b` did NOT hold "~11/12" on verdicts** — parser verdicts 3, 2, 0, 3
+   of 4 — so by the queue's own rule it does not take the fast tier from udq8kxl.
+   The shape of its misses matters though: `interp` scored 13/13 in all four runs
+   (one of them past the wall), `perf` 5/6 and `template` 6/10 at the cutoff. This
+   is a model that gets there and is slow about it (template PASS at 888 s), not one
+   that lacks the capability; at `TASK_TIMEOUT=1200` most of those TIMEOUTs would
+   flip. It never touches regex (0/4, no file in 3 of 4) — udq8kxl is still the only
+   fleet member that passes regex, and at 193 vs 84 tok/s.
+3. **bench_07 is the news: 19/20 vs 11/20.** The `lastline`/`evidence` weakness that
+   bench_07 exists to detect — the gpt-oss-20b trait behind the July nanoeuler
+   ebuild sessions — is simply absent in Ornith 1.5 9B: every tail-read and
+   hallucination item 20/20. For rule-heavy multi-step qwen-code jobs (ebuild
+   authoring, long QWEN.md/RULES files) that is the axis that costs real sessions,
+   and the harness mitigations (checklist at the top of the file) were written for
+   the model that no longer needs to be the default there.
+4. **Roles after tonight:** `gpt-oss20b-udq8kxl` = fast coding tier (scoped
+   sprints, regex, raw speed); `ornith15-9b` = workflow agent (whole-fit 12 GiB,
+   84 tok/s, follows rules); `ornith15-128k` = serious agentic. `qwythos` is
+   dominated on every axis by `ornith15-9b` (same size class, parser tier, 95 %
+   workflow, no Xid 8 hang) → retired; 18 GB (MTP + plain files) delete candidate.
+   Tiel-Coder (coder finetune of this base) now has a reason to be benched.
+5. Operational side effect worth a line: the 35B passes leave ~1.7 GB of VRAM to
+   the desktop, and a Netflix tab in Chrome went black-with-audio during the run
+   (Chromium `SharedImageManager::ProduceSkia … non-existent mailbox` at 21:31 —
+   a video frame whose GPU texture never got allocated). Retest with the GPU free
+   pending; if confirmed, queues want a lean desktop or a floor+4 profile.
+
+## Reference results — 2026-09-19 (day): queue 2 — `ornith15-9b` at 1200 s, Tiel-Coder paired with Ornith 1.5, Qwen3.8-9B-Distill
+
+```
+# /var/tmp/bench-o15b-queue.sh, log /var/tmp/bench-o15b-queue-2026-09-19.log, 10:07 → 17:09
+MODELS=ornith15-9b TASKS=template,interp,perf,regex TASK_TIMEOUT=1200 ×3
+MODELS=tiel-128k,ornith15-128k TASKS=… TASK_TIMEOUT=900 ×3      (after a 51K-token preflight)
+MODELS=qwen38d-9b TASKS=… TASK_TIMEOUT=900 ×3; then RUNS=20 ./bench_07_workflow.sh
+```
+
+New this queue: every model that had never booted here got a **preflight** — `aillama
+switch`, one ~51K-token chat request at `-c 131072`, VRAM read after it, and an
+automatic `--n-cpu-moe +2` retry if the server died on first decode. Neither newcomer
+needed the retry: `tiel-128k` at ncmoe 21 → 14.4 GiB, pp 1885 / tg 50.3 at 51K depth;
+`qwen38d-9b` whole → 12.3 GiB, pp 4429 / tg 71.2.
+
+**1. `ornith15-9b`, parser tier at `TASK_TIMEOUT=1200`, three runs:**
+
+| task | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| template | PASS 770 s | PASS 370 s | PASS 394 s |
+| interp | PASS 297 s | PASS 603 s | PASS 176 s |
+| perf | PASS 158 s | PASS 1082 s | PASS 196 s |
+| regex | TIMEOUT 12/14 | TIMEOUT no file | TIMEOUT 0/14 |
+
+11/12-equivalent on all three runs. Yesterday's verdicts at 900 s (3, 2, 0, 3 of 4)
+were the wall, not the model: nothing changed but the budget, and 9/9 non-regex tasks
+pass. The cost is real though — two of the nine needed 770 and 1082 s, i.e. this 9B
+spends up to 18 minutes on a task udq8kxl finishes in two. Reading for the roles: the
+9B is a full coding agent minus regex if you can afford 1200 s per task; for sprints
+udq8kxl stays.
+
+**2. Tiel-Coder-35B-A3B (`tiel-128k`, UD-Q4_K_XL) paired with `ornith15-128k`, 900 s:**
+
+| task | tiel run 1 · 2 · 3 | ornith15-128k run 1 · 2 · 3 |
+|---|---|---|
+| template | PASS 162 · 199 · 154 | PASS 192 · 176 · 170 |
+| interp | PASS 325 · 313 · 293 | PASS 276 · 255 · 218 |
+| perf | PASS 222 · 228 · 143 | PASS 412 · 182 · 214 |
+| regex | TIMEOUT no file · **PASS 14/14 340 s** · TIMEOUT no file | **PASS 14/14 744 s** · TIMEOUT 5/14 · **PASS 14/14 670 s** |
+| parser verdicts | 3, 4, 3 of 4 | 4, 3, 4 of 4 |
+
+Two things here, and neither is "Tiel is better":
+
+- **The regex wall is not a wall.** Ornith 1.5 35B passed regex twice today after 0/4
+  yesterday (where it had already scored 14/14 once but kept verifying past the cutoff).
+  Pooled N=7: 2 PASS, 4 more at ≥11/14 scored. Tiel 1/3, with the fastest regex pass in
+  this log (340 s). So the family's true regex behaviour at 900 s is roughly a one-in-three
+  pass with the solution usually complete-but-unconfirmed at the cutoff — not the
+  "never converges" of Ornith 1.0. **12/12 is now on the table for the 35B**, and udq8kxl
+  is no longer the only fleet member that passes regex.
+- **Tiel = Ornith 1.5 at N=3.** Identical on template/interp/perf (Tiel a shade faster
+  on perf), regex 1/3 vs 2/3 — inside noise. The card's SWE-bench-Live claim does not
+  show up on this suite; 0.6 GiB more weights, one ncmoe step more, 5 % less tg. No reason
+  to switch a default for a tie. Kept as an alternate for now; 21 GB delete candidate.
+
+**3. Qwen3.8-9B-Distill (`qwen38d-9b`) — rejected on both benches:**
+
+| task | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| template | FAIL 2/10 | FAIL 4/10 | FAIL 1/10 |
+| interp | TIMEOUT 9/13 | TIMEOUT 0/13 | TIMEOUT 0/13 |
+| perf | PASS 46 s | PASS 515 s | PASS 136 s |
+| regex | TIMEOUT 0/14 | FAIL 0/14 | FAIL 0/14 |
+
+bench_07 RUNS=20: **1/20 PASS.** Matrix: `summary` 5/20 (the hallucination trap — it
+writes about Euler/numerics because the project is called nanoeuler, 15 times in 20),
+`evidence` 10/20, `lastline` 12/20, `version` 18/20; the five mechanical items 20/20.
+Fast (27–52 s per run, perf in 46 s) and wrong. Same file size and shape as
+`ornith15-9b`, which went 19/20 on the same rubric the night before — the distillation
+target, not the 9B shape, is what decides this. Delete candidate (9.1 GB).
+
+**After queue 2:** roles unchanged — `ornith15-128k` serious agentic (now with a real
+regex chance), `ornith15-9b` workflow agent (and full coding agent at 1200 s),
+`gpt-oss20b-udq8kxl` sprint tier. Queue 3 (Qwen3.8-35B-A3B-Distill, full suite ×3 +
+bench_07) follows in the evening — the interesting question there is whether the
+35B-A3B distill shares the 9B distill's hallucination trait.
+
+## Reference results — 2026-09-19 (evening): queue 3 — Qwen3.8-35B-A3B-Distill, full suite ×3 + bench_07 RUNS=20
+
+```
+# /var/tmp/bench-q38d35-queue.sh, log /var/tmp/bench-q38d35-queue-2026-09-19.log, 17:10 → 20:07
+MODELS=qwen38d-128k TASK_TIMEOUT=900 ./bench_05_agentic.sh   ×3 (all 12 tasks)
+MODELS=qwen38d-128k RUNS=20 ./bench_07_workflow.sh
+```
+
+The sweep pick of the day: `empero-ai/Qwen3.8-35B-A3B-Distill` (published 09-16),
+Qwen3.8-27B distilled into the Qwen3.6-35B-A3B shape — the same `qwen35moe` shape as
+`qwen36-128k` (its base) and `ornith15-128k`, and byte-for-byte the Ornith 1.5 Q4_K_M
+file size, so it inherited the ncmoe-20 recipe untouched. Preflight: 14.1 GiB after a
+51K-token request, pp 1865 / tg 52.9 at that depth — identical to Ornith 1.5.
+
+| task | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| bugfix · scratch · lru · multifile | PASS 38 · 140 · 92 · 66 | PASS 40 · 194 · 40 · 68 | PASS 36 · 73 · 96 · 139 |
+| intervals · fsm · codec · toposort | PASS 113 · 40 · 44 · 39 | PASS 44 · 39 · 41 · 64 | PASS 243 · 54 · 42 · 41 |
+| template | PASS 733 s | TIMEOUT 8/10 | PASS 302 s |
+| interp | PASS 408 s | TIMEOUT 2/13 | PASS 234 s |
+| perf | PASS 54 s | PASS 159 s | PASS 80 s |
+| regex | TIMEOUT 11/14 | TIMEOUT 4/14 | TIMEOUT 0/14 |
+| **PASS** | **11/12** | **9/12** | **11/12** |
+
+bench_07 RUNS=20: **15/20 PASS (75 %)** — `lastline` 16/20, `evidence` 16/20, `summary`
+19/20, the seven others 20/20; FAIL signature `lastline,evidence` (4×) + one `summary`.
+~75–125 s per run.
+
+Reading:
+
+- **The 9B distill's hallucination trait did not carry over.** `summary` 19/20 and
+  version/license 20/20 here vs the 9B's summary 5/20 the same afternoon. So the trait
+  was not "empero distillation" per se — the 35B-A3B target absorbed the 27B teacher, the
+  9B target did not.
+- **Better than its base, not better than Ornith 1.5.** Against `qwen36-128k` (8/12 on
+  09-17, template/interp TIMEOUTs; "tied Ornith 7/8" in July) the distill is clearly
+  stronger on the parser tier and the easy/mid tier is a clean, fast 24/24. Against
+  `ornith15-128k` at the identical speed: interp 2/3 vs 7/7, regex 0/3 vs 2/7, workflow
+  15/20 vs (9B) 19/20 — second place in the same shape. Between udq8kxl (11/20) and
+  Ornith on the workflow axis.
+- The price of the extra quality over `qwen36-128k` is speed: Q4_K_M at ncmoe 20 is
+  tg ~53 against the IQ4_XS base's ~82. `qwen36-128k` stays the fast general profile;
+  `qwen38d-128k` is the stronger general alternate. Neither is a default.
+
+**Fleet after the three queues (09-18 → 09-19):** `gpt-oss20b-udq8kxl` sprint tier ·
+`ornith15-9b` workflow agent (full coding agent at 1200 s) · `ornith15-128k` serious
+agentic (12/12-capable) · `qwen38d-128k` general alternate · `qwen36-128k` fast general ·
+`tiel-128k` tie-with-Ornith alternate. Rejected today: `qwen38d-9b`. Deleted today:
+Ornith 1.0 35B + 9B, Qwythos. Delete candidates on the table: Tiel (21 GB), qwen38d-9b
+(9.1 GB). Open experiment class that none of this touches: bench_08 arm C.

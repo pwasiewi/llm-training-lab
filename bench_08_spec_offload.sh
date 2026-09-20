@@ -17,7 +17,7 @@
 set -euo pipefail
 
 MODEL_ROOT="${MODEL_ROOT:-$HOME/models}"
-MODEL="${MODEL:-$MODEL_ROOT/qwythos-9b-v2/Qwythos-9B-v2-MTP-Q8_0.gguf}"
+MODEL="${MODEL:-}"   # Qwythos deleted 2026-09-19 — pass MODEL= (a GGUF with an MTP head, or -md for a separate draft)
 DRAFT_MODEL="${DRAFT_MODEL:-}"            # only for SPEC_TYPE=draft-simple/eagle3
 SPEC_TYPE="${SPEC_TYPE:-draft-mtp}"       # none | draft-mtp | draft-simple | ngram-mod | ...
 DRAFT_LIST="${DRAFT_LIST:-0,3,4,5,6,8}"   # 0 = --spec-type none (baseline)

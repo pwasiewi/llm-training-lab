@@ -1,5 +1,7 @@
 #!/bin/bash
 # bench_04_qwythos.sh — benchmark Qwythos-9B-v2 (dense hybrid Gated-DeltaNet, arch qwen35)
+# NOTE 2026-09-19: the Qwythos GGUFs were deleted (retired, BENCH.md "Ornith 1.5 queue");
+# this script is kept as the historical MTP/depth-sweep harness — pass MODEL=/MTP_MODEL= or use bench_06.
 # Part of the bench_NN_* series: 01=llama.cpp MoE sweep, 02=ik_llama.cpp, 03=ollama.
 # Qwythos is dense (no MoE), so instead of an --n-cpu-moe sweep this measures:
 #   1. pp/tg vs context depth (linear attention should keep pp near-flat)

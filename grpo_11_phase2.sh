@@ -18,6 +18,10 @@ PRESCORE_LIMIT="${PRESCORE_LIMIT:-3000}"
 # 0.85 OOMs during engine warm-up while a KDE desktop holds ~2 GB of the 16.
 PRESCORE_GMU="${PRESCORE_GMU:-0.75}"
 
+# Exit sentinel: the last line of the run log says how the script ended (success, die, Ctrl-C).
+# A log without it has not finished. See memory feedback_background_job_visibility.
+RUN_LOG="grpo11_${TAG}_run.log"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 help() {
@@ -33,6 +37,8 @@ EOF
 }
 
 [[ ${1:-} == -h || ${1:-} == --help ]] && { help; exit 0; }
+# Registered after the help exit so `--help` never appends to a real log.
+trap 'rc=$?; echo "### ${0##*/} EXIT=$rc ###" | tee -a "$RUN_LOG"' EXIT
 
 used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)
 [[ $used -gt 3000 ]] && die "GPU busy (${used} MiB). A leftover VLLM::EngineCore will OOM the run: nvidia-smi --query-compute-apps=pid,used_memory --format=csv"

@@ -10,6 +10,10 @@ BASE_EVAL="$HERE/eval_math500_base.jsonl"
 STEPS="${STEPS:-200}"
 MAXTOK="${MAXTOK:-2048}"
 
+# Exit sentinel for the whole queue (per-experiment logs are written by redirection below).
+# A queue log without this last line has not finished. See memory feedback_background_job_visibility.
+QUEUE_LOG="${QUEUE_LOG:-grpo11_queue.log}"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 help() {
@@ -41,6 +45,8 @@ EOF
 }
 
 [[ $# -eq 0 || ${1:-} == -h || ${1:-} == --help ]] && { help; exit 0; }
+# Registered after the help exit so `--help` never appends to a real log.
+trap 'rc=$?; echo "### ${0##*/} EXIT=$rc ###" | tee -a "$QUEUE_LOG"' EXIT
 [[ -f $TRAIN ]] || die "missing $TRAIN"
 [[ -f $EVAL ]] || die "missing $EVAL"
 [[ -f $BASE_EVAL ]] || die "missing baseline $BASE_EVAL — run the base eval first"
