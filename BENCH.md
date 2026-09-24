@@ -99,7 +99,7 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 | `qwythos` (Qwythos-9B-v2 +MTP) | qwen35 dense hybrid | Q8_0 | whole | 149 (MTP) | parser tier FAILs (9B ceiling); Xid 8 hang @69K with MTP | **RETIRED 2026-09-19** — dominated by `ornith15-9b` (same size, passes interp/perf, 95 % workflow); 18 GB (two files), delete candidate |
 | `ornith-9b` (Ornith-1.0-9B) | qwen35 dense | Q8_0, 9.53 GiB | whole | | interp 12/13 near-miss @900s; perf anti-pattern | accepted; judgment pending |
 | `ornith15-9b` (Ornith-1.5-9B) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.0 GiB @128K) | 84 / 73 @49K | @900 s N=4: interp 13/13 scored every run but 3/4 by verdict, template 2/4, perf 3/4; **@1200 s N=3: template/interp/perf 3/3 each = 11/12 every run**, regex 0/3 (12/14 once). **bench_07 19/20 PASS** (every axis 20/20, evidence 19/20) | **DEFAULT workflow agent** (rule-heavy multi-step qwen-code jobs, whole-fit); with `TASK_TIMEOUT=1200` also a full coding agent minus regex; udq8kxl keeps the sprint tier (regex, 2.3× tg) |
-| `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18) | ~53 @49K | parser tier N=7: template/interp/perf 7/7 each; **regex 2/7 PASS** (744 s and 670 s on 09-19 — first non-gpt-oss regex passes in this log; 14/14 scored-but-late once, 5/14 once) | **DEFAULT serious agentic** (2026-09-19; beats Ornith 1.0 on interp, same VRAM shape and speed; Tiel-Coder tied it at N=3) |
+| `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18) | ~53 @49K | parser tier N=7: template/interp/perf 7/7 each; **regex 2/7 PASS** (744 s and 670 s on 09-19 — first non-gpt-oss regex passes in this log; 14/14 scored-but-late once, 5/14 once); **bench_07 20/20 PASS, every rubric item 20/20** (2026-09-20) | **DEFAULT serious agentic** (2026-09-19; beats Ornith 1.0 on interp, same VRAM shape and speed; Tiel-Coder tied it at N=3) — **best on both axes**, the only perfect bench_07 in this log |
 | `tiel-128k` (Tiel-Coder-35B-A3B, coder finetune of the Ornith 1.5 base) | qwen35moe | UD-Q4_K_XL, 20.82 GiB | 21 (14.4 GiB after a 51K request) | 50 @51K depth, pp 1885 | parser tier N=3: template/interp/perf 3/3 each, regex 1/3 PASS (340 s = fastest regex pass ever, then 2× TIMEOUT no file) | tied with `ornith15-128k` at N=3 — no measurable coder-finetune edge; 21 GB kept only as an alternate, delete candidate |
 | `qwen38d-9b` (Qwen3.8-9B-Distill, empero-ai) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.3 GiB @128K) | 71 @51K depth, pp 4429 | template FAIL 3/3 (1–4/10), interp 0/3 (9/13 then 0/13 ×2), regex 0/3, perf 3/3 (46 s); **bench_07 1/20** — `summary` 5/20 (riffs Euler/numerics off the project name), evidence 10/20, lastline 12/20 | **REJECTED** — a 9B that hallucinates from names and cannot hold a parser task; delete candidate |
 | `qwen38d-128k` (Qwen3.8-35B-A3B-Distill, empero-ai) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (14.1 GiB after a 51K request) | 53 @51K depth, pp 1865 | full suite ×3: easy/mid 24/24 clean and fast; template 2/3, interp 2/3, perf 3/3, regex 0/3 (11/14 once) → 11, 9, 11 of 12; **bench_07 15/20** (lastline 16, evidence 16, summary 19 — no hallucination trait) | accepted — general alternate, stronger than its base `qwen36-128k` on the parser tier and on bench_07 (udq8kxl 11/20), below `ornith15-128k` (regex, interp 3/3) at the same speed |
@@ -2361,3 +2361,120 @@ agentic (12/12-capable) · `qwen38d-128k` general alternate · `qwen36-128k` fas
 `tiel-128k` tie-with-Ornith alternate. Rejected today: `qwen38d-9b`. Deleted today:
 Ornith 1.0 35B + 9B, Qwythos. Delete candidates on the table: Tiel (21 GB), qwen38d-9b
 (9.1 GB). Open experiment class that none of this touches: bench_08 arm C.
+
+## Reference results — 2026-09-20: bench_07 for `ornith15-128k` — the hole the three queues left, closed at 20/20
+
+```
+# /var/tmp/bench-wf-o15-35b.sh, log /var/tmp/bench-wf-o15-35b.log, 09:52 → 11:14
+MODELS=ornith15-128k RUNS=20 WORKROOT=/tmp/bench-wf-o15-35b ./bench_07_workflow.sh
+```
+
+Queue 1 sent only `ornith15-9b` into phase B, so the model holding the
+serious-agentic role had no workflow-discipline number at all while the 9B below it
+did — the one axis bench_07 exists to measure was missing from the model the fleet
+table recommends. Filled today, same build (b11009), same `relmeta` task, standard
+layout.
+
+**20/20 PASS (100 %).** RULE-COMPLIANCE MATRIX: `deliverable`, `name`, `version`,
+`license`, `summary`, `order`, `lastline`, `protected`, `no-strays`, `evidence` —
+all **20/20**. Run time 190–313 s, mean ~240 s, no timeouts, no near-misses.
+
+| model | bench_07 | tail-read (`lastline`) | evidence-gate | hallucination (`summary`) |
+|---|---|---|---|---|
+| **`ornith15-128k`** | **20/20** | **20/20** | **20/20** | **20/20** |
+| `ornith15-9b` | 19/20 | 20/20 | 19/20 | 20/20 |
+| `qwen38d-128k` | 15/20 | 16/20 | 16/20 | 19/20 |
+| `gpt-oss20b-udq8kxl` | 11/20 | 12/20 | 12/20 | 19/20 |
+| `qwen38d-9b` | 1/20 | 12/20 | 10/20 | 5/20 |
+
+Reading:
+
+- **First perfect bench_07 in this log.** The previous best was the 9B's 19/20 the
+  day before; before Ornith 1.5 nothing had ever cleared 55 % (udq8kxl 11/20, pooled
+  49 % over 35 July runs). A clean 20/20 also means zero stochastic compliance —
+  the drift this bench was built to expose does not appear in this model at N=20.
+- **The open question from the 09-19 write-up is answered the other way.** The
+  hypothesis was that rule-discipline might be a trait the distillation put into the
+  small model, since the 9B out-scored udq8kxl 19/20 to 11/20. It is a family trait,
+  and the 35B has more of it: the parent is perfect where the 9B slipped once on
+  `evidence`.
+- **No trade-off left in the role assignment.** `ornith15-128k` is now first on the
+  coding axis (only 12/12-capable model, only one that passes `regex`) *and* first on
+  the workflow axis. `ornith15-9b` keeps its role on speed and footprint — whole-fit,
+  tg 84 vs 53, ~240 s per relmeta run for the 35B — not on quality.
+
+## Reference results — 2026-09-20: bench_10 — the aildr workload head-to-head, `ornith15-128k` vs `ornith15-9b`: a tie on every axis that matters, 27/30 each
+
+```
+# /var/tmp/bench10-queue.sh, log /var/tmp/bench10-queue.log, 11:30 → 14:45
+for pass in 1 2 3; do MODELS=ornith15-128k,ornith15-9b ITERATIONS=2 QPI=3 TIMEOUT=1500 \
+  SLEEP_BETWEEN=60 WORKROOT=/var/tmp/bench10-20260920-1130-p$pass ./bench_10_research.sh; done
+./bench_10_research.sh --rescore /var/tmp/bench10-20260920-1130-p{1,2,3}
+```
+
+**Why a new bench.** bench_05 scores code, bench_07 scores rule-following; the aildr
+loop does neither — it reads dozens of search snippets in a long context, decides
+what to search next and writes a cited synthesis. Its failure modes are believing one
+confident wrong source, fabricating citations, and being slow across many sequential
+calls. `bench_10_research.sh` runs LDR's own loop through `aildr local` (local model
+gathers *and* writes, no Claude in the path) on ten questions, each with an oracle:
+MUST patterns for the right answer, MUST_NOT for the tempting falsehood. Three are
+adversarial — the BBR-replaced-CUBIC trap (a VyOS forum post says yes; in the smoke
+run the 35B believed it), a false premise ("why did Gentoo remove OpenRC in 2025?"),
+and an io_uring nuance. Engine pinned per question and identical for both models
+(searxng for the traps and docs, wikipedia for anchors, arxiv for the paper); model
+order alternates per question; a SearXNG health gate waits out engine suspensions
+and retries a source-less run once (fired once in 60 runs); three passes.
+
+**Result (after the oracle fix below):**
+
+| model | CORRECT | WRONG | MISS | median s | unique sources | dup % | orphan citations | uncited / run |
+|---|---|---|---|---|---|---|---|---|
+| `ornith15-128k` | **27/30** | 0 | 3 | 111 | 12.2 | 12 | 0 | 4.6 |
+| `ornith15-9b` | **27/30** | 0 | 3 | 116 | 13.0 | 13 | 1 | 5.5 |
+
+Per question both are 3/3 on nine of ten — including all three adversarial ones —
+and 0/3 on `mamba2`, where neither run retrieved the Mamba-2 paper (arxiv appeared
+in 5 of 6 source lists but never the right entry); both then said so explicitly and
+filled from "previous knowledge" with a wrong description (the 35B credited Mamba-2
+with S6 gating, which is Mamba-1's; the 9B called it a hybrid). A search failure
+handled the same honest-but-wrong way by both.
+
+**The oracle needed two fixes, both applied symmetrically and rescored offline.**
+First scoring showed 24/23 CORRECT and 3/4 WRONG; every one of the eight WRONGs was
+a false positive — the MUST_NOT phrase quoted inside a denial ("no evidence that
+Gentoo removed OpenRC", "they do not support the claim that BBR is the default") or
+a question heading ("Has BBR Replaced CUBIC as the Default?"). MUST_NOT now counts
+only in assertive sentences (no heading, no `?`, no negation token). The
+false-premise MUST list was then too narrow for the 9B's phrasing ("I cannot
+confirm", "never explicitly state") — broadened; all six gentoo answers reject the
+premise on reading. `--rescore` mode added so an oracle fix never costs a rerun.
+
+**Reading.**
+
+1. **Indistinguishable at the job.** Same correctness, same three misses, the same
+   traps passed 3/3, near-identical source counts; the one hallucination-class signal
+   in 60 runs is a single orphan citation, in the 9B's column.
+2. **The 9B is not faster here.** Median 111 vs 116 s, 57 min total each — the LDR
+   loop is search- and fetch-bound, so tg 84 vs 53 never shows. Speed would only
+   separate them when the LLM share grows (more iterations, Claude-driven follow-ups).
+3. **The blind read agrees**: the 9B writes longer, more structured answers (io_uring:
+   680 vs 527 words, short answer / CVE list / bottom line); the 35B is terser with a
+   sharper caveat about truncated excerpts. Neither is better research prose.
+4. **So the decision falls to what surrounds the job.** The 9B leaves ~4 GB of VRAM at
+   128K, enough for the embedder on the GPU at a small batch (measured below); the 35B
+   leaves 1.5 GB and forces the embedder onto the CPU. The 35B's edges — 12/12 coding,
+   20/20 workflow discipline — are real and irrelevant to LDR's loop.
+
+**Decision for aildr: `ornith15-9b`** — equal research quality, the GPU has room for
+the embedder, faster per call for the day the loop stops being search-bound.
+`ornith15-128k` stays the serious-agentic default for coding and rule-heavy work.
+
+**Embedder beside the 9B, measured right after (Qwen3-Embedding-0.6B Q8_0, `--gpu`):**
+baseline `ornith15-9b` @128K + desktop 12 629 MiB; `-c/-ub/-b 1024` → +1 640 MiB (14 269
+total) but a 1 202-token input is rejected (`exceed_context_size_error`); `-c/-ub/-b 2048`
+→ +2 421 MiB (15 050 total, ~1.25 GB spare), 1 202-token input embeds fine (1024-dim).
+The default 8192 batch is the 6.6 GB figure — buffers, not weights. So: 2048 during a
+run (covers airag's 2000-char chunks and LDR snippets), 8192 only for bulk `airag index`
+on the empty card. Left running: `ornith15-9b` + GPU embedder at 2048.
+
