@@ -99,11 +99,18 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 | `qwythos` (Qwythos-9B-v2 +MTP) | qwen35 dense hybrid | Q8_0 | whole | 149 (MTP) | parser tier FAILs (9B ceiling); Xid 8 hang @69K with MTP | **RETIRED 2026-09-19** — dominated by `ornith15-9b` (same size, passes interp/perf, 95 % workflow); 18 GB (two files), delete candidate |
 | `ornith-9b` (Ornith-1.0-9B) | qwen35 dense | Q8_0, 9.53 GiB | whole | | interp 12/13 near-miss @900s; perf anti-pattern | accepted; judgment pending |
 | `ornith15-9b` (Ornith-1.5-9B) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.0 GiB @128K) | 84 / 73 @49K | @900 s N=4: interp 13/13 scored every run but 3/4 by verdict, template 2/4, perf 3/4; **@1200 s N=3: template/interp/perf 3/3 each = 11/12 every run**, regex 0/3 (12/14 once). **bench_07 19/20 PASS** (every axis 20/20, evidence 19/20) | **DEFAULT workflow agent** (rule-heavy multi-step qwen-code jobs, whole-fit); with `TASK_TIMEOUT=1200` also a full coding agent minus regex; udq8kxl keeps the sprint tier (regex, 2.3× tg) |
-| `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18) | ~53 @49K | parser tier N=7: template/interp/perf 7/7 each; **regex 2/7 PASS** (744 s and 670 s on 09-19 — first non-gpt-oss regex passes in this log; 14/14 scored-but-late once, 5/14 once); **bench_07 20/20 PASS, every rubric item 20/20** (2026-09-20) | **DEFAULT serious agentic** (2026-09-19; beats Ornith 1.0 on interp, same VRAM shape and speed; Tiel-Coder tied it at N=3) — **best on both axes**, the only perfect bench_07 in this log |
+| `ornith15-128k-mc` (same GGUF + **expert cache**, PR #27861 user patch) | qwen35moe | Q4_K_M, 20.22 GiB | 28 + `--moe-expert-cache 64`, `-ub 2048` | **71 @49K, pp 2 239** (78 @1K) | parser tier ×2: 8/8, **regex 2/2** (657, 353 s); **bench_07 20/20, every item 20/20** (2026-10-01) | **DEFAULT serious agentic** (2026-10-01) — ornith quality at +31 % decode / ×1.9 prefill vs the 09-30 profile; needs llama-cpp-9999 with the user patch |
+| `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18), `-ub 2048` since 10-01 | 55 @49K, pp 2 691 | parser tier N=7: template/interp/perf 7/7 each; **regex 2/7 PASS** (744 s and 670 s on 09-19 — first non-gpt-oss regex passes in this log; 14/14 scored-but-late once, 5/14 once); **bench_07 20/20 PASS, every rubric item 20/20** (2026-09-20) | no-patch fallback of `ornith15-128k-mc` (2026-10-01); was **DEFAULT serious agentic** 09-19 → 09-30 ( beats Ornith 1.0 on interp, same VRAM shape and speed; Tiel-Coder tied it at N=3) — **best on both axes**, the first perfect bench_07 in this log |
 | `tiel-128k` (Tiel-Coder-35B-A3B, coder finetune of the Ornith 1.5 base) | qwen35moe | UD-Q4_K_XL, 20.82 GiB | 21 (14.4 GiB after a 51K request) | 50 @51K depth, pp 1885 | parser tier N=3: template/interp/perf 3/3 each, regex 1/3 PASS (340 s = fastest regex pass ever, then 2× TIMEOUT no file) | tied with `ornith15-128k` at N=3 — no measurable coder-finetune edge; 21 GB kept only as an alternate, delete candidate |
 | `qwen38d-9b` (Qwen3.8-9B-Distill, empero-ai) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.3 GiB @128K) | 71 @51K depth, pp 4429 | template FAIL 3/3 (1–4/10), interp 0/3 (9/13 then 0/13 ×2), regex 0/3, perf 3/3 (46 s); **bench_07 1/20** — `summary` 5/20 (riffs Euler/numerics off the project name), evidence 10/20, lastline 12/20 | **REJECTED** — a 9B that hallucinates from names and cannot hold a parser task; delete candidate |
 | `qwen38d-128k` (Qwen3.8-35B-A3B-Distill, empero-ai) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (14.1 GiB after a 51K request) | 53 @51K depth, pp 1865 | full suite ×3: easy/mid 24/24 clean and fast; template 2/3, interp 2/3, perf 3/3, regex 0/3 (11/14 once) → 11, 9, 11 of 12; **bench_07 15/20** (lastline 16, evidence 16, summary 19 — no hallucination trait) | accepted — general alternate, stronger than its base `qwen36-128k` on the parser tier and on bench_07 (udq8kxl 11/20), below `ornith15-128k` (regex, interp 3/3) at the same speed |
 | `qwen36-128k` (HauhauCS 35B-A3B) | qwen35moe | IQ4_XS, 17.43 GiB | 16 (`--fit`: 16 + ffn_up) | ~82; 49K prompt 1850 pp / 75 tg | fastest template (118 s); insort-not-Fenwick on perf; 8/12 on 09-17 | general alternate — the speed pick (tg ~82); its distill `qwen38d-128k` is stronger at tg ~53 |
+| `strata-iq2xs` (Qwen3.8-Flash-Next 125B, ISTA GSQ-RCO IQ2_XS, **Strata engine**, not llama.cpp) | qwen4exp MoE, 512 experts | IQ2_XS, 63.4 GiB (incl. 26.8 GiB n-gram table) | own expert cache, 128K + `--vram-reserve-mib 1700` (39 GB RAM, 14.7 GB VRAM) | 78–82 @128K cfg (MTP, 10-01 head-to-head; 09-29: ~50), pp ~1 700 — llama.cpp + cache 64 on the same file: 27–35, pp 465 | template 4/4, interp 4/4, **regex 3/3** (279–553 s), perf 2/4 (time budget); bench_07 20/20 every item (N=1) | **candidate** for serious agentic (2026-09-29) — parser tier run 3 cut by a host freeze; one model only, MIT since 2026-09-28 (c0107c3), nothing heavy may run beside it |
+| `apex-mini-mtp` (mudler Qwen3.6-35B-A3B APEX-MTP I-Mini) | qwen35moe A3B | APEX I-Mini, 14.3 GB | whole @40K; spills @128K | ~190 @40K no spec; 120–133 @16K / 79–82 @120K with MTP @128K | bench_05 9/12 (template TIMEOUT 9/10, interp no file, regex TIMEOUT); **bench_07 9/20** (lastline 9, evidence 9) | **REJECTED** (2026-09-29) — base-model quality at a lower bit width; udq8kxl is as fast and passes regex. GGUFs deleted 2026-09-29 (re-download: huggingface.co/mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF) |
+| `huihui35-9b` (huihui-ai Huihui-Qwen3.5-9B-abliterated, mradermacher Q8_0) | qwen35 dense | Q8_0, 9.53 GB | whole (12.2 GiB @128K) | 80 / 70 @49K, pp 4 090 | bench_05 @1200 s stopped after 8 tasks: **3/8 on the easy/mid tier** (lru TIMEOUT 6/8, multifile TIMEOUT 3/5, intervals 10/12, fsm 12/13, codec 7/12) | **REJECTED** (2026-09-29) — "almost right, never finished": abliteration cost edit precision; same speed as ornith15-9b, far below it; GGUF + profile deleted 2026-09-29 |
+| `orcasaq2-27b` (orcarouter OrcaSAQ-2-Cyber-27B-Uncensored, gated) | qwen35 **dense** 27.3B (Qwen3.8-27B-Uncensored) | vendor "OrcaSAQ2" mixed quant, 15.68 GB | no — weights alone fill the card (14.6 GB used @32K via `--fit`) | **10–11** @32K, pp 65 | not run (speed gate) | **REJECTED** (2026-09-30) — the 27B-dense ceiling again; the card's 20.5 tok/s is a 24 GB GPU; GGUF deleted |
+| `nex25-mini` (nex-agi Nex-N2.5-mini, agentic-trained, bartowski Q4_K_M) | qwen35moe 34.7B | Q4_K_M, 22.3 GB | 21 (14.0 GiB) | 48 @49K, pp 1 035 | N=1: 10/12; parser rounds 2–3: regex 14/14 late, then 0/14; interp FAIL 12/13 once; **bench_07 20/20 every item** (10-01) | alternate (2026-10-01) — workflow discipline = ornith, parser tier slower and less reliable |
+| `nex25u-mini` (orcarouter Nex-N2.5-mini-Uncensored, gated) | qwen35moe 34.7B | IQ4_XS, 18.7 GB (on /mnt/cc) | 16 (14.2 GiB) | **64 @49K, pp 1 452** | N=1: 10/12; round 3: 2/4 (interp, regex 100 % but late); **bench_07 18/20** (`summary` 18/20, invents a description) | alternate (2026-10-01) — uncensoring did not break it (unlike huihui), but below nex25-mini on bench_07 |
 | `qwen36u-mxfp4-128k` (unsloth) | qwen35moe | MXFP4_MOE, 20.2 GiB | 16+ | | tied Ornith 7/8 | backup alternate |
 | `glm-flash` (GLM-4.7-Flash) | deepseek2 MoE 30B-A3B | Q4_K_XL, 17.5 GiB | 12 @32K / 22 @128K (was 24) | 63 / 42 | 4/7 — gives up early on parser tier | 32K chat only |
 | `dsv4flash` (Qwen3.5-9B-DSV4) | qwen35 dense | Q6_K | whole | ~93 | interp 0/13 — total parser failure | chat only, **NOT an agent** |
@@ -246,6 +253,8 @@ MODEL=~/models/foo/foo-Q8_0.gguf ./bench_06_dense_generic.sh   # any dense model
 MODEL=... MTP_MODEL=... NGL=50 CTX=32768 ./bench_06_dense_generic.sh   # partial offload + MTP comparison
 MODELS=gpt-oss20b-q8_0,ornith-128k TASK_TIMEOUT=1200 ./bench_05_agentic.sh   # agentic suite
 MODELS=gpt-oss20b-q8_0 RUNS=5 ./bench_07_workflow.sh   # workflow discipline; matrix needs RUNS>1
+MODEL=/path/first-shard.gguf ./bench_11_depth_stream.sh   # pp/tg at prompt depths, client-side timing
+URL=http://127.0.0.1:8080 ./bench_11_depth_stream.sh      # same sweep against any running OpenAI endpoint
 ```
 
 ## Model Storage
@@ -2478,3 +2487,502 @@ The default 8192 batch is the 6.6 GB figure — buffers, not weights. So: 2048 d
 run (covers airag's 2000-char chunks and LDR snippets), 8192 only for bulk `airag index`
 on the empty card. Left running: `ornith15-9b` + GPU embedder at 2048.
 
+
+## Reference results — 2026-09-27: Strata (one-model engine for Qwen3.8-Flash-Next) vs llama.cpp b11086 — code read, llama.cpp baseline measured; Strata measured 2026-09-29 (end of section)
+
+```
+# model: ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF IQ2_XS (2 shards, 63.4 GiB) in /mnt/cc/strata/models/IQ2_XS
+MODEL=/mnt/cc/strata/models/IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \
+  ./bench_11_depth_stream.sh                                       # log /var/tmp/bench11-llama-fit.log
+SERVER_ARGS="--fit on -c 40960 -fa on -ctk q8_0 -ctv q8_0 -t 16 -np 1 --jinja -b 2048 -ub 2048" RUNS=1 \
+  MODEL=... ./bench_11_depth_stream.sh                             # log /var/tmp/bench11-llama-fit-ub2048.log
+```
+
+**What Strata is.** `github.com/Niko1221/Strata` (created 2026-09-24, 251 stars in 3 days,
+no LICENSE file despite "free and open source" — legally all-rights-reserved until one
+lands; not packageable into ::pwr as is). Not a llama.cpp fork: ~18 K lines of its own
+C++/CUDA written for exactly one model (Qwen3.8-Flash-Next, `qwen4exp`: 48 layers, 36
+Gated-DeltaNet + 12 QSA sparse-attention, 512 experts top-10 per layer, hyper-connections,
+a 51 B-parameter n-gram embedding table), linking ggml only for the i-quant CPU dot
+products and the vision encoder (llama.cpp pinned at `3cf0325`, 2026-09-20). Security read:
+no network code in the engine; `serve/server.py` fetches image URLs it is handed; `setup.py`
+by default downloads a prebuilt binary from the author's GitHub releases (build from source
+instead) and `apt`-installs build tools on Ubuntu.
+
+**The "177 B" in the 2026-09-17 HF sweep was 125 B + the 51 B n-gram table**, and the
+"out by rule" call was wrong for this model: the table (26.8 GiB, shard 2) is only
+row-indexed by the last three token ids, so it stays mmap'd in the page cache, and the
+IQ2_XS experts are ~36 GB — the whole thing runs on 16 GB VRAM + 64 GB RAM under stock
+llama.cpp (measured below).
+
+**What Strata does that merged llama.cpp does not** (claims from its paper + code; the
+code matches the paper where checked — `generate.cpp` `adapt_every=4`, `adapt_swaps=96`,
+`pcie_frac` 0.55 native / 0.2 Q2_0, a doorbell spin loop in `session.cpp`):
+
+| Strata mechanism | its claimed gain | llama.cpp status (2026-09-27) |
+|---|---|---|
+| **Per-EXPERT VRAM cache**, filled from a routing profile, then every 4 rounds up to 96 of the conversation's hot experts swapped in (async, no wait) | hit rate 0.50 static → 0.72–0.78 adaptive with ~4 500 slots on 12 GB | `--n-cpu-moe`/`-ot`/`--fit` place whole layers (see below: 24 % of routed experts on GPU). Open PR **#27861** (GPU LRU cache for host-offloaded experts, decode-only, +31 % on this model on 2×3090) — measured there: *no* exploitable static skew, strong temporal locality (LRU-128 ≈ 81 % hit) |
+| GPU and CPU experts of one layer computed **at the same time** (router ids through a pinned "doorbell", CPU spins on it), part of the misses DMA'd over PCIe by the copy engine | IQ2_XS 70 → 78 tok/s from the DMA share alone | ggml's scheduler runs CPU and GPU splits one after another |
+| **MTP self-speculation** (the model's own draft layer, fetched as 5 GB from the BF16 checkpoint), draft kept only at p ≥ 0.5 | ×1.6–1.8 in the offloaded regime (plain 47–57 → 82–92 tok/s @4K) | open PRs **#27836 / #28243** (M3 Max: +42 %). Our 2026-09-17 finding "MTP on an offloaded MoE is a loss" (nemotron) does not transfer: here the per-token GPU part is 3.5 GB of dense weights (mixers + 1.3 GB hyper-connections + head), which a 4-token verify window amortises |
+| Gather-based QSA decode (attend only to the ≤ 2 048 selected positions) | flat prefill 4K → 262K | open PR **#28213** (+50 % tg at 130K) |
+| KV streaming (full KV in RAM, 32K-position working set in VRAM) → more expert slots | Q2_0 @262K 50.9 → 62.6 tok/s | none |
+| AVX-512 VNNI Q2_0 kernel | "near RAM bandwidth" | open PR **#26348**; **irrelevant here** — the 5950X (Zen 3) has AVX2 only, no AVX-512/VNNI |
+
+**llama.cpp baseline on nvhard** (RTX 5070 Ti 16 GB, 5950X 16 threads, DDR4, b11086 =
+2026-09-21, which already contains Strata's pinned commit and all merged qwen4exp work:
+sparse FA, hc ops, state rollback). `--fit on` @40K/q8_0 KV put the experts of layers
+13–47 (+ `ffn_down` of 12) on the CPU → **12 of 48 layers' experts on the GPU, 14.6 GiB
+VRAM** (desktop included). Thinking off, 256 generated tokens, client-side timing
+(`bench_11`, matches llama.cpp's own `timings` to ±1 %), warm runs:
+
+| llama.cpp config | pp 1K | pp 4K | pp 32K | tg 1K | tg 4K | tg 32K |
+|---|---:|---:|---:|---:|---:|---:|
+| `--fit on`, `-ub 512` (default) | 210 | 225 | 224 | 29.8 | 28.4 | 23.3 |
+| `--fit on`, **`-b 2048 -ub 2048`** | 266 | **362** | **434** | 26.3 | 25.4 | 23.2 |
+| *Strata's claim, IQ2_XS, RTX 5070 12 GB, 6-core AVX-512, DDR5 (not measured here)* | *332* | *463* | *495* | *82.0* | *78.0* | *65.3* |
+
+Answers are coherent (sanity prompt, tg 26.6). `--load-mode none` was NOT tried: it would
+pull the 26.8 GiB n-gram table into anonymous memory on top of ~24 GiB of CPU experts
+(46 GiB available) — mmap is the only sane mode for this model.
+
+**Reading.**
+
+1. **Prefill: llama.cpp is close once `-ub` is raised.** Every prompt micro-batch re-streams
+   the CPU-side experts (~24 GiB) over PCIe from pageable memory; 2048-token batches cut that
+   4×: pp ×1.6 at 4K, ×1.9 at 32K. Strata streams in 2048-token chunks too — so its prefill
+   edge is ~15–30 %, not an engine class. The fleet rule "keep `-ub` at 512" holds for the
+   35B-A3B profiles (little CPU-expert traffic); for a model whose experts are mostly on the
+   CPU, `-ub 2048` is the lever (tg −1–3 at 1K/4K because the larger compute buffer costs
+   VRAM, equal at 32K).
+2. **Decode: the claimed gap is ~3× and it is structural, not tuning.** llama.cpp serves
+   24 % of routed experts from VRAM by construction (whole layers), Strata claims 72–78 %
+   from fewer slots, overlaps the CPU half with the GPU half, and adds MTP ×1.7. No
+   llama.cpp flag reaches that today; the three open PRs above (#27861 + #28243 + #28213)
+   together would cover most of it.
+3. **Expected Strata on nvhard (estimate, ±30 %, unverified):** more VRAM (16 vs 12 GB ≈ +2 800
+   expert slots) and 16 cores for the arithmetic-bound i-quants push up; DDR4 (≈ 35–40 GB/s
+   vs 41–52) and no AVX-512 push down. IQ2_XS is the right file here (the paper: i-quants are
+   CPU-arithmetic-bound at 20 GB/s on 6 cores, and Q2_0's fast path is AVX-512-only). Guess:
+   decode ~60–85 tok/s at 4K, i.e. 2.5–3× llama.cpp.
+4. **Caveats on the claims.** Every published number is ONE run per cell on one Windows
+   box; three days old; mostly AI-assisted commits; the parity test tree (`tests/`,
+   `bench/micro/`) is not in the published source. The exactness claim is well argued
+   (teacher-forced KL 0.022 vs llama.cpp; cache on/off perplexity equal within 1 SE) but
+   was not reproduced here.
+5. **Quality is untested on our benches.** Speed alone does not make it a fleet candidate:
+   IQ2_XS of a 125 B model vs `ornith15-128k` (Q4_K_M 35 B) on bench_05/07 is the question
+   that decides a role, and it can run on llama.cpp today at ~25 tok/s (bench_05 at that
+   speed needs TASK_TIMEOUT ≥ 1800).
+
+**Build notes (done 2026-09-27, operator-authorised).** The first attempt was blocked by the
+auto-mode permission classifier (external code); the user then authorised it. ccache broke the
+first build ("File exists") — build with `CCACHE_DISABLE=1 -DGGML_CCACHE=OFF`. Prepared on /mnt/cc/strata (437 GB free
+before, ~64 GB used now): the GGUF, a clean copy of the source (`src/`), llama.cpp at the
+pinned `3cf0325` (`llama.cpp/`), a venv with numpy/jinja2/regex/pyyaml/tqdm/requests/pillow/
+psutil. Remaining steps, by hand:
+```
+cmake -G Ninja -S /mnt/cc/strata/src -B /mnt/cc/strata/build -DCMAKE_BUILD_TYPE=Release \
+  -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF -DCMAKE_CUDA_ARCHITECTURES=120 \
+  -DCMAKE_CUDA_COMPILER=/opt/cuda/bin/nvcc -DCMAKE_C_COMPILER=gcc-15 -DCMAKE_CXX_COMPILER=g++-15 \
+  -DCMAKE_CUDA_HOST_COMPILER=g++-15 -DSTRATA_GGML_DIR=/mnt/cc/strata/llama.cpp
+cmake --build /mnt/cc/strata/build --target strata -j 16
+# then (STRATA_GGUF_PY=/mnt/cc/strata/llama.cpp/gguf-py): tools/iq_pack.py (IQ2_XS pack),
+# tools/mtp_fetch.py fetch (5 GB range reads from Qwen/Qwen3.8-Flash-Next) → mtp_pack.py → mtp_rt.py,
+# serve/server.py with the args setup.py writes (setup.py lines 881-895), then
+URL=http://127.0.0.1:8080 ./bench_11_depth_stream.sh
+```
+`bench_11` counts `completion_tokens` from the usage block; if Strata's server sends
+none, the chunk-count fallback under-counts speculative output (flagged in the `cnt`
+column) — compare its tg against the engine's own log line then.
+
+**Licence update 2026-09-30:** upstream added an MIT `LICENSE` on 2026-09-28 (commit `c0107c3`, the day
+after this review; ggml MIT, web font OFL-1.1, the speed-projection vector in `data/` Qwen Community
+License 1.0). The "all-rights-reserved / not packageable" note above is superseded — an ::pwr ebuild
+must pin a commit at or after `c0107c3` (the local /mnt/cc/strata/src copy predates it).
+
+**Watch list (re-check trigger for the llama.cpp side):** #27861 (expert LRU cache),
+#28243/#27836 (qwen4exp MTP), #28213 (QSA gather decode). Any one merged = re-run the
+two llama.cpp rows above.
+
+### Measured 2026-09-29: Strata on nvhard vs llama.cpp b11086, same prompts
+
+```
+cd /mnt/cc/strata && ./run_bench.sh            # Strata server per config + bench_11 client mode, RUNS=3
+./run_llama_ngram.sh                           # llama.cpp -ub 2048 + --spec-type ngram-simple, RUNS=3
+# logs: /mnt/cc/strata/bench11-{mtp,llama-ngram}.log, engine log strata-iq2_xs-mtp.log
+```
+
+`bench_11` now prefixes every request with a unique nonce line. Without it the 09-27 Strata
+runs were invalid from run 2 on: its conversation cache served 902 of 909 prompt tokens
+("902 reused + 7 read"). With the nonce every request logs "0 reused". Strata footprint:
+39 GB RAM used (of 62), 15.7 GB VRAM, 6 981–7 608 resident expert slots, AVX2 kernels.
+Strata **cannot be served without MTP**: `serve` requires `--mtp`, and an IQ pack requires
+`--spec ≥ 2` — so there is no plain-decode Strata row. llama.cpp's MTP (`draft-mtp`, merged
+in #22673) cannot run on this GGUF: it carries no NextN tensors (Strata fetches its own
+draft layer, `mtp/rt`). The closest pairing is llama.cpp with prompt-lookup drafting.
+
+| engine (RUNS=3, thinking off, 256 tokens) | pp 1K | pp 4K | pp 32K | tg 1K | tg 4K | tg 32K |
+|---|---:|---:|---:|---:|---:|---:|
+| Strata IQ2_XS, MTP `--spec 4 --spec-min-p 0.5`, run 1 (cold) | 376 | 545 | 727 | 80.4 | 77.0 | 81.2 |
+| Strata, runs 2–3 (same text, new nonce) | 600 | 911 | 990 | 88–95 | 69–83 | 73–96 |
+| llama.cpp `--fit on -ub 2048 --spec-type ngram-simple`, run 1 | 241 | 379 | 421 | 26.3 | 27.1 | 21.0 |
+| llama.cpp, runs 2–3 | 326–335 | 413–522 | 531–534 | 29.0–29.5 | 25.7–28.4 | 18.6–23.1 |
+| *Strata's claim (5070 12 GB, AVX-512, DDR5)* | *332* | *463* | *495* | *82.0* | *78.0* | *65.3* |
+
+**Reading.**
+
+1. **Decode: Strata's ~3× is real on this box — about 3× at 1K/4K and 3.5–4× at 32K**
+   (median of 9 Strata runs 81 tok/s vs llama.cpp 18.6–29.5). It matches the paper's
+   claimed numbers, not an optimistic reading of them: nvhard's extra VRAM (≈ +2 500 slots)
+   and 16 cores offset DDR4 and the missing AVX-512. MTP drafts were accepted ~70 % of the time
+   (e.g. 152–170 of 196–230 per 256 tokens).
+2. **Prefill: 1.4–1.9× over llama.cpp at `-ub 2048`**, above the 09-27 "15–30 %" estimate.
+   Both engines get faster on runs 2–3 of the same text with no prompt reuse (nonce, "0
+   reused"), most likely page cache for llama.cpp's mmap'd experts, and Strata's adaptive cache swapping
+   in the experts the text routes to. Real use sits between the rows: a new document is
+   run 1, a follow-up in the same topic is closer to run 2.
+3. **Decode variance is large and unexplained.** A first (discarded, 2-run) sweep an hour
+   earlier had two cells at ~40 tok/s (1K and 32K, run 1) with the same acceptance rate. Do
+   not quote a single Strata run.
+4. **llama.cpp `ngram-simple` does nothing here**: draft acceptance 0–15 %, tg equal to the
+   09-27 no-spec rows. Prompt lookup only pays when the answer copies the prompt; a
+   code review does not.
+5. Status unchanged: no LICENSE upstream (not packageable), quality on bench_05/07 not tested,
+   one model only. For a llama.cpp user the levers today are `-ub 2048` (prefill) and
+   #27861 (expert cache, draft). A Qwen3.5/3.6 MTP GGUF on llama.cpp's `draft-mtp` is the
+   upstream MTP test — a different model, not this comparison.
+
+### 2026-09-29 (continued): Strata on bench_05/07; llama.cpp forks and PRs on the same model; APEX-MTP
+
+```
+/mnt/cc/strata/queue.sh, queue2.sh   # logs queue.log, queue2.log, bench11-*.log, bench05-strata.log, bench07-strata.log
+# bench_05/07 drive Strata through /mnt/cc/strata/aillama-strata (a stand-in for aillama: 'env' prints
+# the endpoint, 'switch' only checks /health); Strata config strata-iq2_xs-mtp128k.json
+AILLAMA_BIN=/mnt/cc/strata/aillama-strata MODELS=strata-iq2xs TASK_TIMEOUT=900 ./bench_05_agentic.sh
+AILLAMA_BIN=/mnt/cc/strata/aillama-strata MODELS=strata-iq2xs RUNS=20 ./bench_07_workflow.sh
+```
+
+**Strata needs two settings for agent work.** At `--max-context 40960` every qwen-code request
+is refused (prompt ~24K + qwen-code's `max_tokens` 32000). And `--expert-cache auto` leaves only
+191 MiB of VRAM free at 128K, so the MTP verify step dies with `verify: instantiate: out of memory`
+on the first real request. Working config: `--max-context 131072 --vram-reserve-mib 1700` →
+1 190 MiB free, 5 147 expert slots (of ~5 835 at the default 700 MiB reserve), no OOM over both
+benches.
+
+**bench_05 (12 tasks, 900 s budget, N=1): 12/12, every task 100 %.** Times (s): bugfix 50,
+scratch 139, lru 88, multifile 109, intervals 62, fsm 77, codec 123, toposort 74, template 186,
+interp 203, perf 262, **regex 279 — PASS 14/14**. For comparison: `ornith15-128k` passes regex
+2/7 (670–744 s), `gpt-oss20b-udq8kxl` 3/3 (the only fleet member that reliably does), the 9B
+tier 0/N. N=1 does not rank (house rule) — Strata needs the parser tier ×3 before it goes into
+the fleet table.
+
+**bench_07 (relmeta, RUNS=20): 20/20 PASS, every rubric item held 20/20** (compliance,
+hallucination, tail-read, thrashing, evidence gate); run 1 took 171 s. Same ceiling as
+`ornith15-128k`, until now the only perfect bench_07 in this log.
+
+Speed during the benches, for scale: Strata MTP decodes at ~81 tok/s on this model where
+llama.cpp manages 20–30, so an agent turn costs about what the 35B-A3B fleet models cost — the
+125 B model is usable as a daily agent on this box. Costs: 39 GB RAM + 14.7 GB VRAM while up, one
+model only, no LICENSE file upstream (not packageable), Windows-first project three days old.
+
+**llama.cpp PR #27861 (GPU LRU expert cache, draft, head bccbacdb8), same IQ2_XS file, RUNS=3:**
+
+| config | pp 1K | pp 4K | pp 32K | tg 1K | tg 4K | tg 32K |
+|---|---:|---:|---:|---:|---:|---:|
+| PR build, `--fit on -ub 2048`, no cache | 224–314 | 352–491 | 420–504 | 25.6–28.1 | 25.3–27.3 | 20.2–21.3 |
+| `--fit-target 4608 --moe-expert-cache 64 --moe-expert-cache-inserts 2` | 271–285 | 434–454 | 464–469 | **33.3–35.1** | **31.7–35.5** | **25.8–26.7** |
+
++25–27 % decode, as the PR claims (+31 %); prefill slightly lower at 1K/4K (4.5 GB kept free
+= fewer layers on the GPU). Decode-only by design, bypassed under speculative decoding. Still
+~2.5× behind Strata. When it merges: `--moe-expert-cache` is worth it for every CPU-heavy MoE.
+
+**2026-09-30: the PR ported onto current master (25747b0) — +31–60 % decode, output identical.** The PR's
+base is 08-28; on master `src/CMakeLists.txt` (indentation) and the `build_moe_ffn` hook conflicted —
+master had grown new SILU branches (`ggml_swiglu_clamp` for MAPLE/DEEPSEEK4/GLM5_NEXT/HY_V4/DFLASH,
+a MISTRAL4 precision flag) that the cache chain must mirror exactly. Ported patch:
+`/mnt/cc/strata/llama-cpp-moe-expert-cache-pr27861.patch` (12 files, +646). Test build
+`/mnt/cc/strata/master_build`, same `--fit on --fit-target 4608 -ub 2048` for both arms
+(`/var/tmp/pr-verify.sh`): greedy 200-token answer **byte-identical** with `--moe-expert-cache 0` and
+`64`; tg 23.9–25.3 → **35.6–39.4** at 1K/4K, 22.6–23.0 → **29.6–31.3** at 32K; pp unchanged
+(305/491/498 vs 304/485/506 warm). Larger than the +25–27 % on the PR's own base.
+
+**Installed 2026-09-30:** user patch `/etc/portage/patches/sci-misc/llama-cpp-9999/0001-moe-expert-cache-pr27861-ported-to-25747b0.patch`,
+rebuilt with `sudo env EMERGE_DEFAULT_OPTS="--jobs=16 --load-average=32 --quiet-build=y"
+EGIT_OVERRIDE_COMMIT_GGML_ORG_LLAMA_CPP=25747b08e7a0 emerge -1 --usepkg=n sci-misc/llama-cpp` (the installed 9999 is
+::stuff's; the pin keeps the patch on the verified commit; a plain `emerge -1` does nothing — `--update` in the
+defaults skips an installed live package). Now build 11284. The cache is opt-in (`--moe-expert-cache N`), no
+profile uses it yet. Fleet check after the jump from b11086 (`/var/tmp/fleet-check.sh`, 1K + 49K, RUNS=1 cold):
+all six main profiles boot and hold 49K, VRAM 11.9–14.5 GB. Same-day comparisons show no regression
+(nex25-mini 1 035/47.7 → 1 069/49.7, nex25u-mini 1 452/64.4 → 1 462/64.5 pp/tg @49K; ornith15-9b 4 502/72.9 =
+09-17). ornith15-128k (pp 1 163 vs 1 416) and qwen36-128k (1 562/67 vs ~1 850/75) are lower against 09-17
+numbers from b11009 — different build and desktop load, single cold run: re-measure ×2 before calling it.
+
+**`--moe-expert-cache` on a fleet profile (2026-09-30, `/var/tmp/cache-test.sh`, log `/var/tmp/cache-test.log`):**
+`ornith15-128k` (Ornith-1.5-35B-A3B Q4_K_M), profile args at 128K, `--moe-expert-cache-inserts 2`, RUNS=2:
+
+| config | VRAM | tg 1K | tg 16K | tg 49K | pp 49K |
+|---|---:|---:|---:|---:|---:|
+| ncmoe 20, cache 0 (current profile) | 14.0 GB | 45.0–45.7 | 57.9–58.4 | 45.6–50.8 | 1 127–1 139 |
+| ncmoe 22, cache 16 | 13.9 GB | 61.9–62.4 | 56.4–61.5 | 51.4–55.5 | 1 085–1 087 |
+| ncmoe 24, cache 32 | 13.6 GB | 63.3–67.5 | 57.7–61.3 | 55.2–63.5 | 1 014 |
+| **ncmoe 26, cache 48** | 13.8 GB | **70.2–77.4** | **73.1–75.6** | **67.6–68.1** | 970 |
+
+Trading 6 expert layers for 48 cache slots per CPU layer: decode **+30–50 %** at every depth, prefill −14 % at
+49K (the cache is decode-only; prefill streams more CPU layers), VRAM no higher. Still rising at 48 slots —
+try ncmoe 28 / cache 64 next. Same-session baseline only (the 1K baseline of 45 is below this morning's 63:
+decode varies run to run here, so read the rows against each other). Not yet in models.conf: a profile change
+needs bench_05/07 unchanged (the split is exact by construction — Strata model byte-identical — but the
+harness is the proof).
+
+**ik_llama.cpp (70bd424) cannot load this file:** SIGFPE in `gguf_init_from_file` — the ISTA
+GSQ-RCO IQ2_XS carries 53 tensors of upstream type 42 (`Q2_0`), which ik's type table (ends at
+41) does not know. ik has qwen4exp and Qwen 3.8 MTP (its PR 2369), but needs an ik-made quant; the
+smallest published one (ji-farthing IQ3_KT) is 86 GB, larger than 62 GB RAM + 16 GB VRAM.
+Upstream llama.cpp still has no qwen4exp MTP (PRs #28243, #27836 open), so on this model MTP
+exists only in Strata. The EasiiX standalone head (`mtp-Qwen3.8-Flash-Next-hc-Q8_0.gguf`,
+4.1 GB, `-md`) is downloaded for when either lands.
+
+**Qwen3.6-35B-A3B APEX-MTP (mudler) on llama.cpp b11086, `--fit on`, q8_0 KV, 40K, RUNS=3**
+(the "65–70 t/s on an RX 9070 XT" forum claim that started this):
+
+| file | spec | pp 1K | pp 4K | pp 32K | tg 1K | tg 4K | tg 32K |
+|---|---|---:|---:|---:|---:|---:|---:|
+| I-Mini 14.3 GB (whole on GPU) | none | 2 630–2 870 | 3 330–3 380 | 3 350–3 430 | **191–192** | **185–187** | 147–148 |
+| I-Mini | `draft-mtp`, n_max 3 | 1 420–1 600 | 1 800–1 880 | 1 930–2 010 | 152–172 | 152–164 | 162–166 |
+| I-Compact 17.3 GB (partly CPU) | none | 660–720 | 740–780 | 700–760 | 105–109 | 106–107 | 69–92 |
+| I-Compact | `draft-mtp`, n_max 3 | 920–980 | 1 020–1 040 | 1 020 | 88–104 | 94–115 | 97–103 |
+
+MTP draft acceptance 73–83 %, and still: **on a model that fits the GPU, MTP LOSES** — tg −10–18 %
+at 1K/4K, prefill −45 % (the draft head rides every prompt batch); it wins only at 32K (+11 %),
+where the target's own step gets expensive. On Compact it is noise at 1K/4K and +15 % at 32K.
+(Compact's higher prefill with MTP on is unexplained — probably a different `--fit`
+placement; not investigated.) The 5070 Ti does 190 tok/s on the Mini without any fork — the
+9070 XT claim is about a model fully in VRAM, which says nothing about hybrid engines. MTP
+pays where the per-token dense GPU work is large and the experts are elsewhere (Strata's case),
+not on a 3B-active model that already runs from VRAM.
+
+### 2026-09-29 (continued): 128K context — Strata vs Qwen3.6-35B-A3B APEX-MTP, speed + needle
+
+```
+/mnt/cc/strata/queue3.sh     # log queue3.log; per-run logs ctx128-<engine>-{speed,needle}.log
+URL=... DEPTHS=16384,65536,120000 RUNS=2 NGEN=256 ./bench_11_depth_stream.sh            # speed
+URL=... DEPTHS=16384,65536,120000 RUNS=2 NGEN=48 NEEDLE=1 ./bench_11_depth_stream.sh     # retrieval
+# Strata: strata-iq2_xs-mtp128k.json (--max-context 131072 --vram-reserve-mib 1700)
+# llama.cpp b11086: --fit on -fa on -c 131072 -ctk q8_0 -ctv q8_0 -np 1 [--spec-type draft-mtp --spec-draft-n-max 3]
+```
+
+`NEEDLE=1` (new in bench_11) plants `// SECRET-CODE: <random hex>` a quarter of the way into the
+prompt, fresh per run, and checks the answer contains it. **Needle: 30/30 OK** — every engine,
+every depth up to 115–120K tokens, both runs. 128K works on all five configurations; VRAM
+14.8–14.9 GB after load for the llama.cpp ones.
+
+| engine @ `-c 131072` (runs 1–2) | pp 16K | pp 64K | pp 120K | tg 16K | tg 64K | tg 120K |
+|---|---:|---:|---:|---:|---:|---:|
+| Strata IQ2_XS 125 B, MTP | 509–949 | 747–913 | 746–895 | 32–50 | 47–50 | 50–55 |
+| APEX I-Mini, no spec | 885–907 | 842–874 | 814–821 | 108–122 | 94–95 | 76.5 |
+| APEX I-Mini, `draft-mtp` | 1 402–1 411 | 1 248–1 262 | 1 166–1 170 | 120–133 | 101–107 | 79–82 |
+| APEX I-Compact, no spec | 620–627 | 601–606 | 581–586 | 82–84 | 69–70 | 58–59 |
+| APEX I-Compact, `draft-mtp` | 772–803 | 751–755 | 715–720 | 90–92 | 78–83 | 72–75 |
+
+Time to first token for a 120K prompt: Strata 129–154 s, Mini+MTP 103 s, Compact+MTP 168 s.
+
+**Reading.**
+
+1. **At 128K the Mini no longer fits the GPU**: `--fit` spills experts to make room for the KV
+   cache, so prefill drops from 2 600–3 400 (40K context) to 815–905 and decode from ~190 to
+   76–122. Context size, not model file size, decides "whole in VRAM" here.
+2. **With experts on the CPU, MTP wins again**: tg +5–10 % on the Mini, +10–25 % on Compact,
+   growing with depth — the same rule as Strata's case (MTP pays when the target step is expensive).
+3. **MTP raises prefill** (+55 % Mini, +23 % Compact), as it did for Compact at 40K. Unexplained;
+   the server log does not print `--fit`'s placement, so a different layer split is the guess,
+   not a finding. Worth one run with the placement pinned (`-ncmoe`) before trusting it.
+4. **Strata at 128K decodes ~50 tok/s**, down from ~81 at 40K (fewer expert slots after the
+   1 700 MiB reserve, larger KV working set — likely, not isolated). A 35B-A3B at 120K on plain
+   llama.cpp with MTP (72–82) now decodes faster than the 125 B Strata; prefill is comparable.
+   The trade is model size (125 B vs 35 B) against speed — bench_05/07 at N≥3 decide whether the
+   bigger model earns it.
+
+### 2026-09-29 evening: Strata parser tier ×3 (incomplete) + APEX Mini+MTP agentic
+
+```
+/mnt/cc/strata/queue5.sh   # Strata 128K config, TASKS=template,interp,perf,regex TASK_TIMEOUT=900, 3 runs
+/mnt/cc/strata/queue4.sh   # APEX I-Mini + draft-mtp @131072: bench_05 full x1, bench_07 RUNS=20 (driven via aillama-strata, STRATA_URL=:8120)
+```
+
+**Strata, parser tier (logs parser-strata-run{1,2,3}.log):**
+
+| task | run 1 | run 2 | run 3 | + 09-29 full run | total |
+|---|---|---|---|---|---|
+| template | PASS 219 s | PASS 159 s | PASS 126 s | PASS 186 s | **4/4** |
+| interp | PASS 205 s | PASS 297 s | PASS 249 s | PASS 203 s | **4/4** |
+| perf | TIMEOUT (6/6 scored) | PASS 415 s | FAIL 5/6 (440 s) | PASS 262 s | **2/4** |
+| regex | PASS 553 s | PASS 349 s | — machine froze | PASS 279 s | **3/3** |
+
+Against `ornith15-128k` (N=7: template/interp/perf 7/7, regex 2/7): Strata is clearly stronger on
+regex (3/3, 279–553 s vs 2/7 at 670–744 s) and weaker on perf (the hard time budget; one TIMEOUT
+with every test green = too slow, one near-miss). Too few runs for a ranking; the pattern is
+"best reasoner in the log, slowest finisher".
+
+**The run-3 regex task never finished: the host froze at 19:21.** Strata's generation stalled at
+2 809 thinking tokens ~60 s into the task (token count flat for 250 s) and the whole machine
+hung 5 min later; the previous boot's journal has no OOM, NVRM or hung-task line. Contributing
+for certain: a 16-job `cargo build` started at ~19:20 beside Strata's 39 GB with no swap (an
+operator-side mistake — nothing heavy runs beside Strata). Root cause of the stall itself: not
+determined. Rule for the next Strata run: nothing else heavy on the box, and watch `free -g`.
+
+**Earlier queue bug (fixed):** `cd $S/src && python server.py … &` backgrounds the whole `cd && …`
+list, so `$!` is a subshell and `kill $spid` never reaches the server. queue3's Strata server
+stayed up orphaned, queue4's Strata start then failed on "port 8080 already in use", and all 12
+parser tasks "failed" in 22 s against the dead engine (discarded). Now `cd` first, then start;
+queue5 refuses to start when :8080 is busy.
+
+**APEX Qwen3.6-35B-A3B I-Mini + `draft-mtp` @131072 (base Qwen3.6, not a finetune):** bench_05
+**9/12** — easy/mid 8/8 in 43–72 s, perf PASS 288 s, template TIMEOUT 9/10, interp FAIL (no file),
+regex TIMEOUT. bench_07 **9/20 PASS**: lastline 9/20, evidence 9/20, everything else 20/20
+(runs ~82 s). One better than `qwen36-128k` (8/12) at ~1.5× its speed → at most a faster
+general alternate; not a candidate against Ornith 1.5 or `gpt-oss20b-udq8kxl`.
+
+### 2026-09-29 night: Huihui-Qwen3.5-9B-abliterated — rejected on the easy tier
+
+```
+# profile huihui35-9b = ornith15-9b's shape (-ngl 99 -c 131072 q8_0 KV), GGUF ~/models/huihui35-9b
+MODELS=huihui35-9b TASK_TIMEOUT=1200 WORKROOT=/tmp/bench-agentic-huihui ./bench_05_agentic.sh   # stopped after task 8
+```
+
+Most-downloaded abliterated Qwen 3.5 (mradermacher GGUF 61K downloads, original 143 likes),
+tested because of good community opinions. Preflight fine: whole in VRAM at 128K (12.2 GiB),
+49K prompt at pp 4 090 / tg 70 (ornith15-9b: 4 491 / 73), 49K needle found. bench_05 at the
+1200 s budget where ornith15-9b scores 11/12: bugfix PASS 21 s, scratch PASS 49 s, toposort
+PASS 34 s — then lru TIMEOUT (6/8), multifile TIMEOUT (3/5), intervals FAIL 10/12 (1 100 s),
+fsm FAIL 12/13, codec FAIL 7/12 (1 082 s). **3/8 on the tier every strong model sweeps**; stopped
+there (operator's call — the parser tier and bench_07 could only add hours). Failure shape:
+correct first drafts, then fix-test loops that never close the last one or two tests — the
+known cost of abliteration (removing the refusal direction also blunts precise editing).
+Community "good" opinions are about uncensored chat, not agentic coding.
+
+### 2026-09-30: OrcaSAQ-2-Cyber-27B-Uncensored — rejected on speed (dense 27B, again)
+
+Gated repo (`hf` login 42n4 + "Agree"), one file, 15.68 GB, vendor's proprietary "OrcaSAQ2"
+sensitivity-aware mixed quant of `orcarouter/Qwen3.8-27B-Uncensored` (claims +0.8 % PPL vs BF16 —
+unverified). The forum figure "20.5 tok/s on 16 GB" is, per the card, a **24 GB GPU** with 14.9 GB
+peak at its example `-c 32768`. Here, `llama-server --fit on -c 32768 -fa on -ctk/-ctv q8_0`:
+14.6 GB VRAM, **pp 65 / tg 11.4 at 1K, pp 65 / tg 10.0 at 16K**, 16K needle OK. The 64K run was
+cancelled by the operator — a 27B dense whose weights fill the card cannot reach agent context
+at a usable speed (fleet rule: 27B dense @128K is architecturally impossible on 16 GB).
+orcarouter's other GGUFs: GLM-5.3-Flash 321B, DeepSeek-V4-Flash 284B, Qwen3.8-Flash-Next-Uncensored
+177B (too big) and **Nex-N2.5-mini-Uncensored** (qwen35moe 34.7B) — tested next, beside the
+original `nex-agi/Nex-N2.5-mini`.
+
+### 2026-09-30: Nex-N2.5-mini, original vs uncensored — bench_05 N=1: 10/12 each
+
+```
+/var/tmp/nex-queue.sh   # log /var/tmp/nex-queue.log; bench_05 logs /var/tmp/nex{,u}-bench05.log
+MODELS=nex25-mini  TASK_TIMEOUT=900 WORKROOT=/tmp/bench-agentic-nex  ./bench_05_agentic.sh
+MODELS=nex25u-mini TASK_TIMEOUT=900 WORKROOT=/tmp/bench-agentic-nexu ./bench_05_agentic.sh
+```
+
+`nex-agi/Nex-N2.5-mini` (850 likes, Apache-2.0) is a 34.7B qwen35moe post-trained for long-horizon
+agentic work (coding, tools, self-correction). Original = bartowski Q4_K_M 22.3 GB, profile ncmoe 21
+(ornith15-128k's 20 + one step for the larger file; 14.0 GiB loaded); uncensored = orcarouter IQ4_XS
+18.7 GB, ncmoe 16 (qwen36-128k's shape; 14.2 GiB). Preflight 49K: original pp 1 035 / tg 47.7,
+uncensored pp 1 452 / tg 64.4; needle OK on both.
+
+| task | nex25-mini | nex25u-mini |
+|---|---|---|
+| easy/mid 8 | 8/8, 57–186 s | 8/8, 37–126 s |
+| template | FAIL 4/10 (761 s) | **PASS 10/10** (725 s) |
+| interp | PASS 13/13 (688 s) | TIMEOUT, 13/13 scored |
+| perf | PASS (204 s) | PASS (643 s) |
+| regex | TIMEOUT, **14/14 scored** | TIMEOUT 5/14 |
+
+Both 10/12 at N=1, in ornith15-128k's first-run range (11/12 on 09-17), and both misses on the
+parser tier include a "solved but late" (regex 14/14 at the cutoff; interp 13/13) — the kind a
+repeat can flip. Unlike huihui35-9b, the orcarouter uncensoring did not damage editing precision;
+the IQ4_XS/ncmoe 16 variant is also ~35 % faster. N=1 does not rank: next is the parser tier ×3
+and bench_07 RUNS=20 for both, with ornith15-128k in the same session.
+
+**Stage 2 (09-30 08:51 → stopped 11:31 by the operator, to continue at night)** — parser tier,
+`/var/tmp/nex-stage2.sh`, logs `/var/tmp/nex-parser-run{1,2}.log`, TASK_TIMEOUT=900:
+
+| task | nex25-mini | nex25u-mini | ornith15-128k |
+|---|---|---|---|
+| template | PASS 432 s, PASS 518 s | PASS 810 s, PASS 571 s | PASS 307 s |
+| interp | PASS 824 s, PASS 434 s | PASS 336 s, (run 2 cut) | PASS 354 s |
+| perf | PASS 130 s, TIMEOUT 5/6 | PASS 187 s | PASS 135 s |
+| regex | TIMEOUT 14/14, TIMEOUT 14/14 | TIMEOUT 14/14 | **PASS 588 s** |
+
+Operator's reading: "no revolution but quite solid". Correctness equals the incumbent (every task
+100 % scored), completion time does not: both Nex variants solve regex every time (14/14 ×4 incl.
+stage 1) but never inside 900 s, and the "faster" uncensored IQ4_XS (tg 64 vs 53) is not faster
+per task — it thinks longer. Still to run: round 3 and bench_07 RUNS=20 for all three.
+
+### 2026-10-01 night queue: `-ub 2048` + expert cache on ornith, Strata head-to-head, Nex finished
+
+```
+~/Claude/llm/night/night-queue.sh   # log + summary in ~/Claude/llm/night/, agent dirs /mnt/cc/strata/night-work
+# llama.cpp b11284 + ported PR #27861 (user patch), 128K, q8_0 KV, --load-mode none; bench_11 RUNS=2
+```
+
+**1. ornith 35B (Ornith-1.5-35B-A3B Q4_K_M) sweep, same session, @49K (mean of 2 runs):**
+
+| ncmoe / cache / ubatch | pp 1K | tg 1K | pp 49K | tg 49K |
+|---|---:|---:|---:|---:|
+| 20 / 0 / 512 (profile until 09-30) | 1 020 | 60.0 | 1 152 | 54.3 |
+| **20 / 0 / 2048** → `ornith15-128k` | 1 616 | 60.9 | **2 691** | 55.1 |
+| 22 / 0 / 2048 | 1 556 | 57.5 | 2 590 | 51.0 |
+| 26 / 48 / 512 | 877 | 78.7 | 958 | 66.6 |
+| 26 / 48 / 2048 | 1 371 | 77.5 | 2 348 | 67.8 |
+| 28 / 64 / 512 | 819 | 84.2 | 908 | 73.5 |
+| **28 / 64 / 2048** → `ornith15-128k-mc` | 1 271 | 77.7 | **2 239** | **71.3** |
+
+`-b 2048 -ub 2048` is the largest single gain this fleet has seen from a flag since `--load-mode none`:
+prefill ×2.3 at 49K, decode unchanged, and it still fits at the same ncmoe. It also removes the expert cache's
+prefill penalty (the cache is decode-only; more CPU layers used to cost −14 % pp). Net, the cache profile vs the
+09-30 profile: **pp ×1.9, tg +31 %** at 49K. Both picks written into models.conf and boot-checked
+(backup `models.conf.bak-night-20261001`).
+
+**2. Strata vs llama.cpp + PR on the Strata model (Qwen3.8-Flash-Next IQ2_XS), 128K, same session:**
+
+| engine | pp 16K | pp 49K | tg 1K | tg 16K | tg 49K | needle @49K | VRAM / RAM free |
+|---|---:|---:|---:|---:|---:|---|---|
+| llama.cpp `--fit-target 4608`, cache 0 | 236 | 263 | 18.1 | 16.5 | 16.6 | OK | 11.1 GB / 52 GB |
+| llama.cpp `--fit-target 4608`, cache 64 | 478 | 465 | 34.8 | 31.7 | 27.2 | OK | 15.7 GB / 52 GB |
+| **Strata 0.1.27 (packaged), MTP** | **1 676** | **1 777** | **79.9** | **82.4** | **78.0** | OK | 14.7 GB / 22 GB |
+
+Strata keeps a 2.3–2.9× decode and 3.5–3.8× prefill lead over the best llama.cpp setting. Caveat: the cache-0 arm
+shared `--fit-target 4608` and left 4.5 GB VRAM idle, so it understates plain llama.cpp (09-30: 23–25 tg at
+`--fit on`); the cache's real gain on this model is the 09-30 +31–60 %, not ×2.
+
+**3. Does the cache profile keep ornith's scores? Yes.** Parser tier ×2, same pass:
+
+| profile | template | interp | perf | regex |
+|---|---|---|---|---|
+| `ornith15-128k-mc` | 2/2 (107, 328 s) | 2/2 (191, 154 s) | 2/2 (201, 159 s) | **2/2** (657, 353 s) |
+| `ornith15-128k` (ub 2048) | 2/2 | 2/2 | 1/2 (TIMEOUT 6/6 scored) | **2/2** (602, 583 s) |
+
+bench_07 RUNS=20: `ornith15-128k-mc` **20/20, every rubric item 20/20** — the second perfect bench_07 in this
+log, same GGUF as the first. → **`ornith15-128k-mc` is the serious-agentic default**; `ornith15-128k` stays as the
+no-patch fallback (llama.cpp without the user patch rejects `--moe-expert-cache`).
+
+**4. Nex-N2.5-mini finished.** Round 3 parser tier: `nex25-mini` 2/4 (interp FAIL 12/13, regex TIMEOUT 0/14),
+`nex25u-mini` 2/4 (interp + regex 100 % scored but late). bench_07 RUNS=20: `nex25-mini` **20/20 every item**,
+`nex25u-mini` 18/20 (`summary` 18/20 — invents a project description twice). Verdict: alternates; workflow
+discipline equals ornith, parser tier slower and less reliable.
+
+**5. qwen36-128k re-measure (×2):** pp 1 548 / tg 67.2 @49K (1K: 1 383 / 79.3) — the 09-17 1 850 / 75 is not
+reproduced; the drop after b11009 → b11284 is real for this profile (see the ub 2048 sweep below).
+
+**6. `-b/-ub 2048` on the other CPU-offload profiles (`night/ub-sweep.sh`, same session, @49K, mean of 2):**
+
+| profile | before (ncmoe, ub 512) pp / tg | after (ub 2048) pp / tg | ncmoe |
+|---|---:|---:|---|
+| `qwen36-128k` | 1 544 / 67.1 | **3 062** / 63.1 | 16 → 18 (16 + ub 2048 dies on the first request) |
+| `qwen38d-128k` | 1 198 / 55.9 | **2 608** / 51.8 | 20 → 22 (same) |
+| `nex25-mini` | 1 074 / 51.0 | **2 596** / 49.6 | 21 |
+| `nex25u-mini` | 1 456 / 67.1 | **3 159** / 66.7 | 16 |
+
+Prefill ×2.1–2.4 everywhere. The ub 2048 compute buffer is ~0.9 GB larger: two profiles needed +2 ncmoe and pay
+−6–7 % decode for it; an agent turn (a few K new tokens + a few hundred generated) still comes out ahead, and a
+first 24K-token qwen-code prompt drops from ~16 s to ~8 s. All four written to models.conf (backup
+`models.conf.bak-ub-20261001`). A server that boots at ub 2048 can still die on the first request — the sweep's
+1K row is the check, `/health` is not.
