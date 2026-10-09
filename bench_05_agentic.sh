@@ -39,6 +39,17 @@
 #               capture groups: classes, ranges, negation, \d \w \s,
 #               greedy * + ?, alternation, nested groups) from tests;
 #               import re/regex forbidden and AST-verified
+#
+# Server death (2026-10-02): a FAIL/TIMEOUT whose agent.log carries an
+# undici transport error (UND_ERR_SOCKET / ECONNREFUSED / fetch failed /
+# other side closed) means llama-server died under the agent (the Xid 31
+# cold-start crash, night/research/08-xid31-first-request.md) — not that
+# the model failed. Such a task is reported as "FAIL (Ns) — SERVER DIED
+# (<signature>); task not scored", its score is dropped, and the summary
+# counts it separately ("N tasks lost to server death"). After every task
+# the server must still answer /health; if it does not, the remaining
+# tasks of that model are SKIPPED (also counted as lost) instead of being
+# run against a dead server, and the next switch_model restarts it.
 # Description: BENCH.md
 set -euo pipefail
 
@@ -55,6 +66,23 @@ export QWEN_CODE_SUPPRESS_YOLO_WARNING=1
 # inject unrelated context mid-task and perturb the verdict/timing.
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# qwen-code prints one of these undici transport errors when llama-server
+# dies under it. A non-PASS task with one in agent.log is a LOST task, not
+# a model failure. Extend the alternation when a new transport signature
+# shows up; keep it to the error tokens, not the surrounding prose.
+SERVER_DEATH_RE='UND_ERR_SOCKET|ECONNREFUSED|fetch failed|other side closed'
+
+# server_died LOG — print the first server-death signature found in LOG and
+# succeed; fail (silently) when there is none or no log. Usable on its own:
+#   bash -c 'source <(sed -n "/^SERVER_DEATH_RE=/,/^}/p" bench_05_agentic.sh); server_died X/agent.log'
+server_died() {
+	local sig
+	[[ -f "${1:-}" ]] || return 1
+	sig=$(grep -oE "$SERVER_DEATH_RE" "$1" | head -n1) || true
+	[[ -n "$sig" ]] || return 1
+	echo "$sig"
+}
 
 # Run the task's pytest suite (quiet, no tracebacks), write the pass ratio
 # "passed/total (pct%)" to $1/.score, and succeed only when every test
@@ -76,7 +104,7 @@ scored_pytest() {
 	(( passed > 0 && passed == total ))
 }
 
-pomoc() {
+help() {
 	cat <<EOF
 Usage: ${0##*/} [-h]
 
@@ -85,7 +113,10 @@ llama-server to it and run each task in TASKS through headless qwen-code,
 then verify the result objectively (script-side pytest + checksums).
 Prints a summary table: verdict (PASS/FAIL/TIMEOUT), SCORE (tests passed /
 total with percentage — TIMEOUT is scored on the work left at the cutoff)
-and wall time.
+and wall time. A task whose agent.log shows llama-server died under the
+agent is marked "SERVER DIED (<signature>); task not scored" and counted
+separately as lost, not as a model failure; the rest of that model's
+tasks are SKIPPED until the next profile switch restarts the server.
 
 The server is left running on the LAST profile in MODELS.
 
@@ -1083,12 +1114,18 @@ verify_regex() {
 
 # ------------------------------------------------------------- plumbing ----
 
-wait_health() {
-	local base i
+# server_alive — llama-server answers /health right now (one probe)
+server_alive() {
+	local base
 	base=$("$AILLAMA_BIN" env | sed -n 's/^export OPENAI_BASE_URL="\(.*\)\/v1".*/\1/p')
 	[[ -n "$base" ]] || die "cannot determine endpoint from '$AILLAMA_BIN env'"
+	curl -sf -m 10 "$base/health" >/dev/null 2>&1
+}
+
+wait_health() {
+	local i
 	for i in $(seq 1 60); do
-		curl -sf "$base/health" >/dev/null 2>&1 && return 0
+		server_alive && return 0
 		sleep 5
 	done
 	die "llama-server not healthy after 300 s"
@@ -1104,12 +1141,15 @@ switch_model() {
 		die "aillama switch $model failed (full log: $swlog)"
 	}
 	wait_health
+	SERVER_DEAD=0
 }
 
 RESULTS=()
+LOST=0          # tasks lost to server death: died under the agent, or skipped
+SERVER_DEAD=0   # /health stopped answering after a task; cleared by switch_model
 
 run_task() {
-	local model="$1" task="$2" dir rc=0 start dur verdict reason="" score=""
+	local model="$1" task="$2" dir rc=0 start dur verdict reason="" score="" sig=""
 	dir="$WORKROOT/$model/$task"
 	rm -rf "$dir" && mkdir -p "$dir"
 	"setup_$task" "$dir"
@@ -1130,22 +1170,44 @@ run_task() {
 		verdict="FAIL"
 	fi
 	score=$(cat "$dir/.score" 2>/dev/null) || true
+	if [[ $verdict != PASS ]] && sig=$(server_died "$dir/agent.log"); then
+		# llama-server died under the agent: a lost task, not a model failure
+		reason="SERVER DIED ($sig); task not scored"
+		score=""
+		((LOST++)) || true
+	fi
 	echo "=== [$model/$task] $verdict (${dur}s) ${score:+[$score] }${reason:+— $reason}"
 	RESULTS+=("$model|$task|$verdict|${score:--}|${dur}s|$reason")
+	if ! server_alive; then
+		SERVER_DEAD=1
+		echo "!!! llama-server does not answer /health after $model/$task — remaining tasks of this model are SKIPPED; the next switch_model restarts it" >&2
+	fi
 }
 
 summary() {
-	local r
+	local r m t v s d n npass=0 nfail=0 ntmo=0
 	echo
 	echo "==================== SUMMARY ===================="
 	printf '%-14s %-10s %-8s %-13s %-7s %s\n' "MODEL" "TASK" "VERDICT" "SCORE" "TIME" "NOTE"
 	for r in "${RESULTS[@]}"; do
 		IFS='|' read -r m t v s d n <<<"$r"
 		printf '%-14s %-10s %-8s %-13s %-7s %s\n' "$m" "$t" "$v" "$s" "$d" "$n"
+		# lost rows (SERVER DIED / SKIPPED) are in $LOST, never in the FAIL count
+		[[ $n == "SERVER DIED"* || $v == SKIPPED ]] && continue
+		case "$v" in
+			PASS) ((npass++)) || true ;;
+			FAIL) ((nfail++)) || true ;;
+			TIMEOUT) ((ntmo++)) || true ;;
+		esac
 	done
+	echo
+	echo "PASS $npass  FAIL $nfail  TIMEOUT $ntmo  —  $LOST tasks lost to server death (not model failures)"
+	if (( LOST )); then
+		echo "Lost = 'SERVER DIED' and SKIPPED rows above; rerun them, do not count them as FAIL."
+	fi
 }
 
-[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && pomoc
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && help
 command -v "$QWEN_BIN" >/dev/null || die "binary not found: $QWEN_BIN"
 command -v "$AILLAMA_BIN" >/dev/null || die "binary not found: $AILLAMA_BIN"
 eval "$("$AILLAMA_BIN" env | grep '^export')"
@@ -1153,6 +1215,13 @@ eval "$("$AILLAMA_BIN" env | grep '^export')"
 for model in ${MODELS//,/ }; do
 	switch_model "$model"
 	for task in ${TASKS//,/ }; do
+		if (( SERVER_DEAD )); then
+			# not a verdict word the queue drivers count (PASS|FAIL|TIMEOUT)
+			echo "=== [$model/$task] SKIPPED — server dead, task not run"
+			RESULTS+=("$model|$task|SKIPPED|-|-|server dead; task not run")
+			((LOST++)) || true
+			continue
+		fi
 		run_task "$model" "$task"
 	done
 done

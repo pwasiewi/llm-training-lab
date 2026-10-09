@@ -48,6 +48,17 @@
 #   lastline/evidence still fail at head -> rule type is the cause
 # Results from the two layouts are separate populations — never pool them.
 #
+# Server death (2026-10-02, same block as bench_05): a FAIL/TIMEOUT run
+# whose agent.log carries an undici transport error (UND_ERR_SOCKET /
+# ECONNREFUSED / fetch failed / other side closed) means llama-server died
+# under the agent (night/research/08-xid31-first-request.md), not that the
+# model failed. The run is reported as "FAIL (Ns) — SERVER DIED
+# (<signature>); run not scored", its score is dropped, it is kept OUT of
+# the compliance matrix, and the summary counts it separately ("N runs
+# lost to server death"). After every run the server must still answer
+# /health; if it does not, the remaining runs/tasks of that model are
+# SKIPPED (also counted as lost) and the next switch_model restarts it.
+#
 # Scores are NOT comparable to bench_05 scores (different rubric, different
 # skill measured). Description: BENCH.md.
 set -euo pipefail
@@ -68,6 +79,21 @@ export QWEN_CODE_SUPPRESS_YOLO_WARNING=1
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# qwen-code prints one of these undici transport errors when llama-server
+# dies under it. A non-PASS run with one in agent.log is a LOST run, not a
+# model failure. (Same helper as bench_05_agentic.sh — keep them identical.)
+SERVER_DEATH_RE='UND_ERR_SOCKET|ECONNREFUSED|fetch failed|other side closed'
+
+# server_died LOG — print the first server-death signature found in LOG and
+# succeed; fail (silently) when there is none or no log.
+server_died() {
+	local sig
+	[[ -f "${1:-}" ]] || return 1
+	sig=$(grep -oE "$SERVER_DEATH_RE" "$1" | head -n1) || true
+	[[ -n "$sig" ]] || return 1
+	echo "$sig"
+}
+
 help() {
 	cat <<EOF
 Usage: ${0##*/} [-h]
@@ -80,7 +106,10 @@ project name, thrashing on a docs-vs-environment mismatch, and an evidence
 gate on the final report. Verdict PASS only at a perfect rubric; SCORE and
 the failed-items list qualify every run. The final RULE-COMPLIANCE MATRIX
 aggregates each rubric item across runs — the stochastic-compliance signal
-this bench exists for.
+this bench exists for. A run whose agent.log shows llama-server died under
+the agent is marked "SERVER DIED (<signature>); run not scored", kept out
+of the matrix and counted separately as lost; the rest of that model's
+runs are SKIPPED until the next profile switch restarts the server.
 
 The server is left running on the LAST profile in MODELS.
 
@@ -544,12 +573,18 @@ verify_relmeta() {
 
 # ------------------------------------------------------------- plumbing ----
 
-wait_health() {
-	local base i
+# server_alive — llama-server answers /health right now (one probe)
+server_alive() {
+	local base
 	base=$("$AILLAMA_BIN" env | sed -n 's/^export OPENAI_BASE_URL="\(.*\)\/v1".*/\1/p')
 	[[ -n "$base" ]] || die "cannot determine endpoint from '$AILLAMA_BIN env'"
+	curl -sf -m 10 "$base/health" >/dev/null 2>&1
+}
+
+wait_health() {
+	local i
 	for i in $(seq 1 60); do
-		curl -sf "$base/health" >/dev/null 2>&1 && return 0
+		server_alive && return 0
 		sleep 5
 	done
 	die "llama-server not healthy after 300 s"
@@ -565,13 +600,17 @@ switch_model() {
 		die "aillama switch $model failed (full log: $swlog)"
 	}
 	wait_health
+	SERVER_DEAD=0
 }
 
 RESULTS=()
 declare -A AGG_PASS AGG_TOT
+LOST=0          # runs lost to server death: died under the agent, or skipped
+SERVER_DEAD=0   # /health stopped answering after a run; cleared by switch_model
 
 run_task() {
 	local model="$1" task="$2" run="$3" dir rc=0 start dur verdict score="" failed=""
+	local note="" sig="" lost=0
 	local suffix=""
 	if [[ "$LAYOUT" != standard ]]; then suffix="-$LAYOUT"; fi
 	dir="$WORKROOT/$model/$task$suffix-run$run"
@@ -594,10 +633,22 @@ run_task() {
 	fi
 	score=$(cat "$dir/.score" 2>/dev/null) || true
 	failed=$(cat "$dir/.fails" 2>/dev/null) || true
-	echo "=== [$model/$task run $run/$RUNS] $verdict (${dur}s) ${score:+[$score] }${failed:+— failed: $failed}"
+	note="${failed:+— failed: $failed}"
+	if [[ $verdict != PASS ]] && sig=$(server_died "$dir/agent.log"); then
+		# llama-server died under the agent: a lost run, not a model failure
+		lost=1; score=""; failed="SERVER DIED ($sig); run not scored"
+		note="— $failed"
+		((LOST++)) || true
+	fi
+	echo "=== [$model/$task run $run/$RUNS] $verdict (${dur}s) ${score:+[$score] }$note"
 	RESULTS+=("$model|$task|$run|$verdict|${score:--}|${dur}s|$failed")
-	# fold per-item results into the compliance matrix
-	if [[ -f "$dir/.items" ]]; then
+	if ! server_alive; then
+		SERVER_DEAD=1
+		echo "!!! llama-server does not answer /health after $model/$task run $run — remaining runs of this model are SKIPPED; the next switch_model restarts it" >&2
+	fi
+	# fold per-item results into the compliance matrix (never a lost run:
+	# its items would all read FAIL and skew every axis)
+	if (( ! lost )) && [[ -f "$dir/.items" ]]; then
 		local iname iverdict _rest
 		while IFS='|' read -r iname iverdict _rest; do
 			AGG_TOT["$model|$iname"]=$(( ${AGG_TOT["$model|$iname"]:-0} + 1 ))
@@ -609,14 +660,26 @@ run_task() {
 }
 
 summary() {
-	local r m t v s d n run item
+	local r m t v s d n run item npass=0 nfail=0 ntmo=0
 	echo
 	echo "========================= SUMMARY (layout: $LAYOUT) =========================="
 	printf '%-16s %-9s %-4s %-8s %-13s %-7s %s\n' "MODEL" "TASK" "RUN" "VERDICT" "SCORE" "TIME" "FAILED ITEMS"
 	for r in "${RESULTS[@]}"; do
 		IFS='|' read -r m t run v s d n <<<"$r"
 		printf '%-16s %-9s %-4s %-8s %-13s %-7s %s\n' "$m" "$t" "$run" "$v" "$s" "$d" "$n"
+		# lost rows (SERVER DIED / SKIPPED) are in $LOST, never in the FAIL count
+		[[ $n == "SERVER DIED"* || $v == SKIPPED ]] && continue
+		case "$v" in
+			PASS) ((npass++)) || true ;;
+			FAIL) ((nfail++)) || true ;;
+			TIMEOUT) ((ntmo++)) || true ;;
+		esac
 	done
+	echo
+	echo "PASS $npass  FAIL $nfail  TIMEOUT $ntmo  —  $LOST runs lost to server death (not model failures, not in the matrix)"
+	if (( LOST )); then
+		echo "Lost = 'SERVER DIED' and SKIPPED rows above; rerun them, do not count them as FAIL."
+	fi
 	echo
 	echo "=========== RULE-COMPLIANCE MATRIX (held / runs) ==========="
 	printf '%-16s %-12s %-14s %s\n' "MODEL" "ITEM" "AXIS" "HELD"
@@ -644,6 +707,13 @@ for model in ${MODELS//,/ }; do
 	switch_model "$model"
 	for task in ${TASKS//,/ }; do
 		for run in $(seq 1 "$RUNS"); do
+			if (( SERVER_DEAD )); then
+				# not a verdict word the queue drivers count (PASS|FAIL|TIMEOUT)
+				echo "=== [$model/$task run $run/$RUNS] SKIPPED — server dead, run not started"
+				RESULTS+=("$model|$task|$run|SKIPPED|-|-|server dead; run not started")
+				((LOST++)) || true
+				continue
+			fi
 			run_task "$model" "$task" "$run"
 		done
 	done

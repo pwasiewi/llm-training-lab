@@ -93,19 +93,22 @@ use (GGUF possibly deleted), ref = kept only as a data point.
 
 | Profile / model | Arch | Quant, file size | Fit @128K (`--n-cpu-moe`) | tg tok/s | bench_05 weak spots | Status / role |
 |---|---|---|---|---|---|---|
-| `gpt-oss20b-udq8kxl` (unsloth UD) | MoE 20.9B | Q8_K_XL, 12.29 GiB | whole (0) | ~193 | interp 3/3, regex 3/3 clean (bench_05); bench_07 11/20 again on 2026-09-19 (lastline 12/20, evidence 12/20 — base-model trait, stable since July) | **DEFAULT fast coding tier** (only fleet member that passes regex; 22–43 s per bench_07 run) |
+| `gpt-oss20b-udq8kxl` (unsloth UD) | MoE 20.9B | Q8_K_XL, 12.29 GiB | whole (0) | ~193 | interp 3/3, regex 3/3 clean (bench_05); bench_07 11/20 again on 2026-09-19 (lastline 12/20, evidence 12/20 — base-model trait, stable since July) | fallback of `gpt-oss20b-udq8kxl-high` since 2026-10-02 (template-default effort = medium; the only fleet member that passes regex; 22–43 s per bench_07 run) |
 | `gpt-oss20b-q8_0` | MoE 20.9B | Q8_0, 12.11 GiB | whole (0) | ~214 | regex 57%, interp 71% (14+ runs); template never failed | fallback (superseded by udq8kxl, still fastest tg) |
 | `ornith-128k` (Ornith-1.0-35B) | qwen35moe A3B | Q4_K_M, 19.7 GiB | 20 (floor 18, was 24 until 2026-09-17) | ~54 @49K depth | regex never finishes (7/7 TIMEOUT); interp 2/4 at 900 s in the 2026-09-19 pairing | superseded by `ornith15-128k` (2026-09-19) — 20 GB hub blob, delete candidate |
 | `qwythos` (Qwythos-9B-v2 +MTP) | qwen35 dense hybrid | Q8_0 | whole | 149 (MTP) | parser tier FAILs (9B ceiling); Xid 8 hang @69K with MTP | **RETIRED 2026-09-19** — dominated by `ornith15-9b` (same size, passes interp/perf, 95 % workflow); 18 GB (two files), delete candidate |
 | `ornith-9b` (Ornith-1.0-9B) | qwen35 dense | Q8_0, 9.53 GiB | whole | | interp 12/13 near-miss @900s; perf anti-pattern | accepted; judgment pending |
 | `ornith15-9b` (Ornith-1.5-9B) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.0 GiB @128K) | 84 / 73 @49K | @900 s N=4: interp 13/13 scored every run but 3/4 by verdict, template 2/4, perf 3/4; **@1200 s N=3: template/interp/perf 3/3 each = 11/12 every run**, regex 0/3 (12/14 once). **bench_07 19/20 PASS** (every axis 20/20, evidence 19/20) | **DEFAULT workflow agent** (rule-heavy multi-step qwen-code jobs, whole-fit); with `TASK_TIMEOUT=1200` also a full coding agent minus regex; udq8kxl keeps the sprint tier (regex, 2.3× tg) |
 | `ornith15-128k-mc` (same GGUF + **expert cache**, PR #27861 user patch) | qwen35moe | Q4_K_M, 20.22 GiB | 28 + `--moe-expert-cache 64`, `-ub 2048` | **71 @49K, pp 2 239** (78 @1K) | parser tier ×2: 8/8, **regex 2/2** (657, 353 s); **bench_07 20/20, every item 20/20** (2026-10-01) | **DEFAULT serious agentic** (2026-10-01) — ornith quality at +31 % decode / ×1.9 prefill vs the 09-30 profile; needs llama-cpp-9999 with the user patch |
+| `tiel-128k-mc` (Tiel-Coder-35B-A3B + **expert cache**) | qwen35moe | UD-Q4_K_XL, 20.82 GiB | 29 + `--moe-expert-cache 64`, `-ub 2048` | 67.5 @49K, pp 2 190 | parser tier 2 rounds: **4/4, 4/4** (regex 14/14 in 413 s, 455 s); **bench_07 20/20, every item 20/20** (2026-10-02) | **ALTERNATE serious agentic** (2026-10-02) — the only sibling that matches `ornith15-128k-mc` on both axes, ~6 % slower decode; falls back to `tiel-128k` without the user patch |
+| `gpt-oss20b-udq8kxl-high` (same GGUF + `--reasoning-effort high`) | MoE 20.9B | Q8_K_XL, 12.29 GiB | whole (0) | ~193 | **bench_07 17/20 and 15/20** (two N=20 sessions; default 12/20, 9/20; low 4/20); median run 42 s | **DEFAULT fast coding tier** (2026-10-02) — the lastline/evidence weakness was effort-dependent |
+| `qwen36-128k-mc` / `nex25u-mini-mc` / `qwen38d-128k-mc` / `nex25-mini-mc` / `tiel-128k-mc` (sibling GGUFs + expert cache) | qwen35moe | as the base lines | nc 24/48 · 22/48 · 28/48 · 29/64 · 29/64 slots, `-ub 2048` | 49K tg 74.7 · 77.8 · 68.5 · 67.8 · 67.5 (base 58.7 · 64.2 · 51.8 · 48.8 · 49.5) | needle 3/3 each; parser round 1 (pre-fix build) / round 2 (fixed): tiel **4/4 / 4/4**, nex25u 2/4 / 2/4, nex25-mini 2/4 / 2/4, qwen38d 1/4 (bug casualties) / 3/4 (regex 0/14), qwen36 3/4 / –; bench_07 (N=20): tiel **20/20**, nex25-mini 19/20, nex25u 17/20, qwen36 12/20, qwen38d 11/20 | **cache profiles of the siblings** (2026-10-02); each falls back to its base line without the user patch |
 | `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18), `-ub 2048` since 10-01 | 55 @49K, pp 2 691 | parser tier N=7: template/interp/perf 7/7 each; **regex 2/7 PASS** (744 s and 670 s on 09-19 — first non-gpt-oss regex passes in this log; 14/14 scored-but-late once, 5/14 once); **bench_07 20/20 PASS, every rubric item 20/20** (2026-09-20) | no-patch fallback of `ornith15-128k-mc` (2026-10-01); was **DEFAULT serious agentic** 09-19 → 09-30 ( beats Ornith 1.0 on interp, same VRAM shape and speed; Tiel-Coder tied it at N=3) — **best on both axes**, the first perfect bench_07 in this log |
 | `tiel-128k` (Tiel-Coder-35B-A3B, coder finetune of the Ornith 1.5 base) | qwen35moe | UD-Q4_K_XL, 20.82 GiB | 21 (14.4 GiB after a 51K request) | 50 @51K depth, pp 1885 | parser tier N=3: template/interp/perf 3/3 each, regex 1/3 PASS (340 s = fastest regex pass ever, then 2× TIMEOUT no file) | tied with `ornith15-128k` at N=3 — no measurable coder-finetune edge; 21 GB kept only as an alternate, delete candidate |
 | `qwen38d-9b` (Qwen3.8-9B-Distill, empero-ai) | qwen35 dense | Q8_0, 9.11 GiB | whole (12.3 GiB @128K) | 71 @51K depth, pp 4429 | template FAIL 3/3 (1–4/10), interp 0/3 (9/13 then 0/13 ×2), regex 0/3, perf 3/3 (46 s); **bench_07 1/20** — `summary` 5/20 (riffs Euler/numerics off the project name), evidence 10/20, lastline 12/20 | **REJECTED** — a 9B that hallucinates from names and cannot hold a parser task; delete candidate |
 | `qwen38d-128k` (Qwen3.8-35B-A3B-Distill, empero-ai) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (14.1 GiB after a 51K request) | 53 @51K depth, pp 1865 | full suite ×3: easy/mid 24/24 clean and fast; template 2/3, interp 2/3, perf 3/3, regex 0/3 (11/14 once) → 11, 9, 11 of 12; **bench_07 15/20** (lastline 16, evidence 16, summary 19 — no hallucination trait) | accepted — general alternate, stronger than its base `qwen36-128k` on the parser tier and on bench_07 (udq8kxl 11/20), below `ornith15-128k` (regex, interp 3/3) at the same speed |
 | `qwen36-128k` (HauhauCS 35B-A3B) | qwen35moe | IQ4_XS, 17.43 GiB | 16 (`--fit`: 16 + ffn_up) | ~82; 49K prompt 1850 pp / 75 tg | fastest template (118 s); insort-not-Fenwick on perf; 8/12 on 09-17 | general alternate — the speed pick (tg ~82); its distill `qwen38d-128k` is stronger at tg ~53 |
-| `strata-iq2xs` (Qwen3.8-Flash-Next 125B, ISTA GSQ-RCO IQ2_XS, **Strata engine**, not llama.cpp) | qwen4exp MoE, 512 experts | IQ2_XS, 63.4 GiB (incl. 26.8 GiB n-gram table) | own expert cache, 128K + `--vram-reserve-mib 1700` (39 GB RAM, 14.7 GB VRAM) | 78–82 @128K cfg (MTP, 10-01 head-to-head; 09-29: ~50), pp ~1 700 — llama.cpp + cache 64 on the same file: 27–35, pp 465 | template 4/4, interp 4/4, **regex 3/3** (279–553 s), perf 2/4 (time budget); bench_07 20/20 every item (N=1) | **candidate** for serious agentic (2026-09-29) — parser tier run 3 cut by a host freeze; one model only, MIT since 2026-09-28 (c0107c3), nothing heavy may run beside it |
+| `strata-iq2xs` (Qwen3.8-Flash-Next 125B, ISTA GSQ-RCO IQ2_XS, **Strata engine**, not llama.cpp) | qwen4exp MoE, 512 experts | IQ2_XS, 63.4 GiB (incl. 26.8 GiB n-gram table) | own expert cache, 128K + `--vram-reserve-mib 1700` (39 GB RAM, 14.7 GB VRAM) | 78–82 @128K cfg (MTP, 10-01 head-to-head; 09-29: ~50), pp ~1 700 — llama.cpp + cache 64 on the same file: 27–35, pp 465 | template 4/4, interp 4/4, **regex 3/3** (279–553 s), perf 2/4 (time budget); bench_07 20/20 every item (N=1) | **candidate → tuned 2026-10-02**: 0.1.31 + combined config (pcie 0.35, min-p 0.7, reserve 1000, kv-resident, prefill auto) = **97 tg / pp 2 805 @49K**, parser N=6/6/5 all PASS (regex 210–553 s), perf 4/6; needs bench_07 RUNS=20 on the new config before it takes the serious-agentic role; one model only, nothing heavy beside it |
 | `apex-mini-mtp` (mudler Qwen3.6-35B-A3B APEX-MTP I-Mini) | qwen35moe A3B | APEX I-Mini, 14.3 GB | whole @40K; spills @128K | ~190 @40K no spec; 120–133 @16K / 79–82 @120K with MTP @128K | bench_05 9/12 (template TIMEOUT 9/10, interp no file, regex TIMEOUT); **bench_07 9/20** (lastline 9, evidence 9) | **REJECTED** (2026-09-29) — base-model quality at a lower bit width; udq8kxl is as fast and passes regex. GGUFs deleted 2026-09-29 (re-download: huggingface.co/mudler/Qwen3.6-35B-A3B-APEX-MTP-GGUF) |
 | `huihui35-9b` (huihui-ai Huihui-Qwen3.5-9B-abliterated, mradermacher Q8_0) | qwen35 dense | Q8_0, 9.53 GB | whole (12.2 GiB @128K) | 80 / 70 @49K, pp 4 090 | bench_05 @1200 s stopped after 8 tasks: **3/8 on the easy/mid tier** (lru TIMEOUT 6/8, multifile TIMEOUT 3/5, intervals 10/12, fsm 12/13, codec 7/12) | **REJECTED** (2026-09-29) — "almost right, never finished": abliteration cost edit precision; same speed as ornith15-9b, far below it; GGUF + profile deleted 2026-09-29 |
 | `orcasaq2-27b` (orcarouter OrcaSAQ-2-Cyber-27B-Uncensored, gated) | qwen35 **dense** 27.3B (Qwen3.8-27B-Uncensored) | vendor "OrcaSAQ2" mixed quant, 15.68 GB | no — weights alone fill the card (14.6 GB used @32K via `--fit`) | **10–11** @32K, pp 65 | not run (speed gate) | **REJECTED** (2026-09-30) — the 27B-dense ceiling again; the card's 20.5 tok/s is a 24 GB GPU; GGUF deleted |
@@ -2986,3 +2989,148 @@ Prefill ×2.1–2.4 everywhere. The ub 2048 compute buffer is ~0.9 GB larger: tw
 first 24K-token qwen-code prompt drops from ~16 s to ~8 s. All four written to models.conf (backup
 `models.conf.bak-ub-20261001`). A server that boots at ub 2048 can still die on the first request — the sweep's
 1K row is the check, `/health` is not.
+
+### 2026-10-01: PR #27861 thread review, fence added, branch on the fork; cache output is NOT byte-identical on ornith
+
+Thread review (42 comments): no reported correctness bug reaches our setup (single CUDA GPU, 1-token decode, no
+draft model). The "tables mutate mid-prefill" bug needs the cache to serve prefill batches (`MAX_TOKENS` > 1
+variants); SYCL/Vulkan/draft-model/duplicate-slot bugs are other backends or batch > 8. One applies in principle:
+a missing fence before `llama_moe_cache_step()` publishes uploads → added pjsgsy's
+`ggml_backend_sched_synchronize(sched)` (his v2/v3). All posted variants: `/mnt/cc/strata/pr27861-variants/`.
+
+Final patch = port + fence: branch https://github.com/pwasiewi/llama.cpp/tree/moe-expert-cache-pr27861-port
+(commit e1295c7 on 25747b0), file `llm/patches/llama-cpp-moe-expert-cache-pr27861-fence.patch`, installed as the
+llama-cpp-9999 user patch (`…-ported-to-25747b0-fence.patch`; the unfenced v1 kept as `…-v1-nofence.patch`).
+Speed unchanged (ornith 28/64/2048 @49K: pp 2 272–2 300, tg 62.6–67.6 vs installed unfenced 2 254 / 68.8).
+
+**Correction to 09-30 "output byte-identical":** that held for the Strata model (200 greedy tokens). On ornith with
+the same `--n-cpu-moe 28` in both arms, cache 0 vs 64 diverges at byte ~226 into another plausible answer, and the
+cache-on answer even changes between two identical requests (the cache fills in between). CPU vs GPU expert math
+rounds differently (also reported in the thread). Quality evidence is the bench results, not identity.
+
+**Intermittent CUDA fault with `-ub 2048`:** Xid 31 "illegal memory access", FAULT_PDE at the same address
+0x3_03200000 three times — qwen36 ncmoe 16 + ub 2048 (cache off), qwen38d ncmoe 20 + ub 2048 (cache off), and the
+fenced build at 28/64/2048 on its 2nd request (then 2/2 clean repeats; the installed build 1/1 clean; the whole night
+of ub 2048 runs clean). The two cache-off cases are why the ub sweep reported "dies on the first request" and moved
+those profiles up 2 ncmoe — it happens near the VRAM limit. Not cache-related; watch for it in daily use, and drop to
+`-ub 1024` on a profile where it shows up.
+
+**A/B: our port + fence vs pjsgsy v3 (admission gate), same session, RUNS=3 (`night/v3-ab.sh`, log `night/v3-ab.log`).**
+v3 = `pr27861-variants/rtx3060_v3_0928.patch` on 25747b0 (fence + TacoTakumi draft fix + windowed admission gate:
+an expert is uploaded only after `--moe-expert-cache-admit` uses within a `--moe-expert-cache-window` half-life;
+defaults 3 / 16). Same args otherwise (`--moe-expert-cache 64 --moe-expert-cache-inserts 2`, `-ub 2048`).
+
+| tg (mean of 3) | ornith 1K | ornith 16K | ornith 49K | Flash-Next 1K | Flash-Next 16K |
+|---|---:|---:|---:|---:|---:|
+| our port + fence | 79.4 | 73.1 | 66.0 | 28.9 | 26.5 |
+| **v3, admit 3 (default)** | **92.4** | **85.3** | **74.0** | 29.5 | 26.5 |
+| v3, admit 1 (gate off) | 76.5 | 75.1 | 67.9 | 25.4 | 23.6 |
+
+Prefill identical across arms (ornith ~2 300 @49K; Flash-Next first-run cold-cache rows aside). The gate is worth
+**+12–17 % decode on ornith** and nothing on the 512-expert model; v3 without the gate is ~12 % slower than our
+port on Flash-Next, so keep the default. No illegal-memory faults in any of the six servers. → **v3 is now the
+llama-cpp-9999 user patch** (`…-pjsgsy-v3-0928.patch`); our fenced port stays on the fork branch as the reference.
+Cache hit/upload stats are printed only at clean shutdown, so none were captured here.
+
+## Night queue 2 — 2026-10-01 → 10-02: research fan-out, the expert cache on every sibling, the Xid 31 root cause, gpt-oss effort
+
+Plan and reports: `night/research/01…09-*.md` (Strata upstream, bench gaps, cache code, prototypes, llama.cpp upstream,
+PR #28414 port, ik_llama, **Xid 31 root cause**, forks/engines). Drivers: `night/night2-queue.sh` (P0–P6),
+`night2b-queue.sh` (P7–P13, resumed after a derail), `post-queue.sh`, `day-queue.sh`, `fix-queue.sh`, `prefetch-queue.sh`,
+`forks-queue.sh`, `prefetch2-queue.sh`, `tail-queue.sh` (chained on EXIT sentinels, all detached). Helpers:
+`night2-lib.sh`. Running log of every number: `night/night2-results-draft.md`. Same-session rule, pick rules and
+bench_07 RUNS=20 as before.
+
+### 1. The "dies on the first request" fault is an upstream bug, fixed with a second user patch
+CUDA MMQ `mul_mat_id` (ggml-cuda/mmq.cu) pads the quantized-activation scratch by `J_max(ne11)` rows; in the MoE path
+`ne11 == 1`, so the pad is **zero** and the kernel's last J-wide tile reads up to 18 KB past the allocation. It is fatal
+only when that pool allocation ends within 18 KB of the VMM pool's mapped end, which on the 35B-A3B class is exactly a
+**1020-token ubatch** (bench_11 prompts are 1019–1028 tokens → "~1 start in 8"). All 20 Xid 31 faults in dmesg are
+`FAULT_PDE VIRT_READ` at pool base + 18 MiB. Upstream: issue #27792, fix PR #27044 (open since 08-13). Our patch
+`/etc/portage/patches/sci-misc/llama-cpp-9999/0002-cuda-mmq-mul-mat-id-pad-src1-q8-1-issue27792.patch` (PR #27044's
+hunk + `ids_dst` pad, clamped to 8 rows; copy in `llm/patches/`). **Proof** (`fix-queue.sh`): deterministic reproducer
+`-b 2048 -ub 907` (128 B of slack) + one ~1K prompt: 3/3 cold starts died on build 11284, **0/3 after the rebuild,
+0/8 at the production `-ub 2048`**; speed unchanged (49K pp 2292 / tg 70.4). Not the ubatch size (probe: `-ub 2048`
+1/8, `-ub 1024` 1/8), not the cache (cache-off configs died), not threads. Consequence for results: every fast
+bench_05 FAIL "<file> not created" whose agent.log ends with `API Error: terminated (UND_ERR_SOCKET)` was the server
+dying, not the model (qwen38d-128k-mc round 1, P7 default round 2 interp, D3 arms) — reruns on the fixed build in tail-queue.
+
+### 2. Expert cache on every CPU-offload sibling (P3, same session, incumbent = profile + ub 2048, 1K/49K ×2)
+
+| profile | incumbent 49K pp / tg | cache 48 (ncmoe+6) | cache 64 (ncmoe+8) | written `-mc` line | needle 16K/64K/120K |
+|---|---|---|---|---|---|
+| qwen36-128k (nc 18) | 3024 / 58.7 | **2655 / 74.7** | died (bug) | nc 24, 48 slots | 3/3 |
+| nex25u-mini (nc 16) | 3131 / 64.2 | **2720 / 77.8** | 2605 / 78.1 | nc 22, 48 | 3/3 (90 / 86 / 81 tg) |
+| qwen38d-128k (nc 22) | died (bug) | **2283 / 68.5** | died | nc 28, 48 | 3/3 |
+| nex25-mini (nc 21) | 2583 / 48.8 | 2282 / 63.0 | **2200 / 67.8** | nc 29, 64 | 3/3 |
+| tiel-128k (nc 21; +ub 2048) | 2593 / 49.5 | 2272 / 63.0 | **2190 / 67.5** | nc 29, 64 | 3/3 |
+| glm-flash-128k (nc 22) | OOM at load | 1107 / 27.2 at nc 28 | — | no (09-17: 42 tg) | — |
+
++21–39 % decode for −12–16 % prefill, the same trade accepted for Ornith. The driver's pick rule (pp ≥ 0.90×) is
+wrong across cache-on/off groups and rejected all of them; lines were written by hand. Rule for next time: a cache arm
+wins at tg ≥ +15 % with pp ≥ 0.80×. Quality so far (parser tier ×1, pre-fix build): **tiel-128k-mc 4/4** (regex 14/14
+in 413 s); nex25u-mini-mc 2/4 (interp 13/13 + regex 13/14 scored but late) and **bench_07 17/20**; nex25-mini-mc 2/4
+(perf TIMEOUT 0/6, regex late); qwen38d-128k-mc 1/4 (two bug casualties); qwen36-128k-mc 3/4 (regex TIMEOUT 3/14) and
+bench_07 12/20 → qwen36 stays the speed pick. Rounds 2 run in tail-queue on the fixed build.
+
+### 3. Default `ornith15-128k-mc`: nothing beats 28/64 at ub 2048 (P2, 1K/16K/49K ×2)
+Incumbent 2240 / 71.3 (16K tg 80, 1K 85). Within noise: inserts 4 (70.3), admit 2/4 (67.6/67.3), window 32 (67.8),
+`-tb 32` (68.7), KV q4_0 (69.9), `--cpu-range 0-15 --cpu-strict 1` (70.4), `--poll 0` (68.3). OOM at load: 28/96,
+32/128, KV f16; 30/96 crashed in cublas at the first request. Dead (bug): inserts 1, -t 12/24/32, ub 4096 @nc 32,
+GGML_CUDA_GRAPH_OPT=1. Prototypes (branch `night2-proto`, /mnt/cc/strata/llama-proto, research/04): A batched cache
+table writes = neutral (70.8 / 2274); **B D2D source for the prefill expert copies = pp +9 % (2438) but tg −9 % (64.6)**;
+B with `LLAMA_MOE_CACHE_VERIFY=2` completed every row (exact). PR #28414 prefetch port (`night2-prefetch`, research/06,
+built as build 6 with the mmq fix), clean A/B on the fixed build (n=3, same session): incumbent 2268 / 72.8;
+B alone 2483 / 74.0; **B + `--prefetch-experts-slots 3` = 2782 / 74.8 at 49K, 2912 / 86.7 at 16K (+23 % prefill, decode
+equal)**; 2 slots 2790 / 72.4; 3 slots at ncmoe 30 2706 / 70.0. The earlier "B costs −9 % tg" was bug-era noise.
+Candidate user patch 0003 = `llm/patches/llama-cpp-moe-cache-b1-e-prefetch-pr28414-night2.patch` (applies on 0001),
+gated by `pf-queue.sh` (parser ×1 + bench_07 RUNS=20 on that binary via aillama `SERVER_BIN`). Speculative decoding on
+the offloaded 35B is closed: 0.8B draft with the cache 86 → 32–40, Qwen3.6 MTP head 53 → 47–48 (forks-queue K3b). Parser round 3 for the default: **4/4, regex 14/14 in 396 s** → N=3 = 12/12 on the parser tier.
+
+### 4. Quality levers
+- **gpt-oss20b-udq8kxl `--reasoning-effort`**, bench_07 RUNS=20 ×2 sessions: low 4/20 (median 15 s), default 12/20 →
+  9/20 (26 s), **high 17/20 → 15/20** (42 s, max 70 s). The "base-model trait" (lastline/evidence) is effort-dependent.
+  `gpt-oss20b-udq8kxl-high` = **DEFAULT fast coding tier** (2026-10-02); the plain line stays as the fallback.
+- **qwen-code sends no sampling fields** to this host, so every bench in this file ran at llama-server's defaults
+  (temperature 0.8, top-k 40, top-p 0.95, min-p 0.05), never greedy. `night/qwen-sampling.sh on|off` writes
+  `model.generationConfig.samplingParams` into `~/.qwen/settings.json` (verified via `/slots`). A/B on the default
+  profile (parser tier): server default 4/4 then 2/4 (one bug casualty, one regex TIMEOUT), Qwen card 0.6/20 4/4,
+  greedy 4/4 → no separation at N=1; more rounds in tail-queue. Thinking stays on by default.
+- **`--reasoning off`** on the default: parser 3/4, **bench_07 11/20** (20/20 with thinking) → never for agents.
+- **`--no-reasoning-preserve`**: parser 4/4 with regex in 273 s, compactions unchanged (0) → round 2 in tail-queue before adoption.
+- Ornith GGUFs carry only the four NextN norm/projection tensors → `draft-mtp` cannot load. ggml-org's Qwen3.5-0.8B as a
+  draft for the 9B (same vocab): 83.8 → 65–69 tok/s at 51–60 % acceptance → no. 35B + draft/MTP arms rerun in forks-queue.
+
+### 5. Strata 0.1.27 → 0.1.31 (sci-ml/strata::pwr) and its knobs
+Bump (ebuild unchanged but the version; cancel-fix #183/#205, truncated tool calls #211/#231, short-prompt prefill
+streaming, AVX2 expert prefetch, `reasoning_budget_tokens`); smoke 78 / 68 tok/s at 1K / 16K. Knob sweep (two sessions,
+1K / 16K, pkg = 78–80 / 81–83 tg, pp 737 / 1676): per-request `strata_tune` **pcie_frac 0.35 + spec_min_p 0.7 → 82–83 tg
+vs 70–72 at the 0.55/0.5 default** (min-p 0.3 hurts); `--kv-resident 32768` 84–86 / 82–85; `--vram-reserve-mib 1000`
+85–87 / 82–85; `--prefill auto` 75 / 80 but **16K pp 2822–2828 (+69 %)**; `--spec 3` 77 / 79, `--spec 6` 74 / 76;
+`--pool-workers 12`, `STRATA_GR_V3=1`, `STRATA_PREFILL_RING=8` within noise (ring8 pp −15 %). Cache stayed 4926–4930
+slots in every arm. **Combined config** (`--pcie-frac 0.35 --spec-min-p 0.7 --vram-reserve-mib 1000 --kv-resident 32768 --prefill auto`)
+vs stock, same session: 49K **pp 2805 / tg 97.2 vs 1767 / 76.2**, 16K tg 96.7 vs 83.6; parser rounds 3–4 on it **8/8**
+(regex 210 s and 229 s) → written into `strata-pkg.json` 10-02 (backup kept). `strata-iq2xs`: N=6/6/5 template/interp/regex
+all PASS, perf 4/6; the fastest serious-agentic option, pending a bench_07 RUNS=20 on the new config.
+
+### 6. Dropped after research
+ik_llama.cpp (no cache equivalent, Flash-Next unloadable: Q2_0; decode −20–30 % expected); KTransformers, exllamav3,
+vLLM/SGLang offload, academic systems (research/09). Two llama.cpp forks built on the same cache PR (neurall `release`,
+thecodacus `perf`) get a build + A/B in `forks-queue.sh`. Rebasing the pin is neutral for the 35B class; worth it only
+for Flash-Next (#29751 qwen4exp fix +13–51 % tg, #29761 MTP).
+
+### 7. Process lessons
+A sed range `/^fn()/,/^}/` over a file with one-line functions ran the driver's wrap-up inside my shell and derailed
+the queue at 00:05 (the control model's regex FAIL at 397 s is that, not a model result). Helpers now live in
+`night/night2-lib.sh` (definitions only). Chained detached scripts (`setsid nohup`, waiting on EXIT sentinels) survive
+session limits and are invisible to the statusline (`ps -eo pid,args | grep queue.sh`). **Never SIGTERM a waiting
+queue script**: bash defers the signal until `sleep` returns and then runs the EXIT trap, which started the 9B server
+beside a running A/B and killed its arms at load; use `kill -9` on a script that is only waiting.
+
+## bench_12 / bench_13 first calibration (2026-10-03)
+
+New harder benches (research/22-26 in `llm/night/research/`): `bench_12_hard.sh` (9 own tasks, bwrap sandbox) and
+`bench_13_public.sh` (SWE-rebench screen 12 + Aider Polyglot hard 20). bench_12: ornith15-128k-mc 18/27 (3 runs),
+tiel-128k-mc 7/9 run 1, gpt-oss20b-udq8kxl-high 1/9. Aider hard 20: ornith 13/20, tiel 11/20 (p = 0.69). In band;
+ornith vs tiel = tie within noise, ornith stays default on speed. tracespec/reconcile budgets to raise to ~2400 s.
+Details: `llm/night/REPORT-night2-2026-10-02.md` §14.
