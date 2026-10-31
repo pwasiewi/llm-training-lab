@@ -1,0 +1,23 @@
+# tinyhash-1.4.recipe
+DESCRIPTION="Tiny FNV-1a hashing library and CLI"
+HOMEPAGE="https://example.invalid/tinyhash"
+SRC_URI="tinyhash-1.4.tar.gz"
+LICENSE="MIT"
+SLOT="0"
+IUSE="static-libs"
+
+PATCHES=( "${FILESDIR}/${P}-makefile.patch" )
+
+src_compile() {
+	emake CC="${CC}" all $(use static-libs && echo libtinyhash.a)
+}
+
+src_test() {
+	emake CC="${CC}" check
+}
+
+src_install() {
+	emake DESTDIR="${D}" PREFIX=/usr LIBDIR="/usr/$(get_libdir)" install
+	use static-libs && emake DESTDIR="${D}" LIBDIR="/usr/$(get_libdir)" install-static
+	einstalldocs
+}

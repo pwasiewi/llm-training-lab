@@ -1,0 +1,27 @@
+# bench_13 overlay for mini-swe-agent's builtin benchmarks/swebench.yaml
+# (merged after it: `-c swebench.yaml -c bench13/swe_local.yaml`).
+# Local OpenAI-compatible endpoint; api_base / model / wall time are passed
+# per run by bench_13_public.sh with `-c key=value` overrides.
+# SWE-rebench 2026 methodology: no demos, no 80-step cap, 128K context is the
+# only limit. We keep mini's 250-step cap (Nebius' own mini run used 300) and
+# add a wall-clock cap so one stuck task cannot eat the night.
+agent:
+  step_limit: 250
+  cost_limit: 0            # local model: no $ budget
+  wall_time_limit_seconds: 2400
+environment:
+  # no network for the agent's task container: every task is a MERGED upstream
+  # PR (= the gold patch) and git/curl/pip are in the image. mini runs the
+  # model client on the host and only `docker exec`s into the container, so the
+  # endpoint needs no container network; the official eval containers keep theirs.
+  run_args: ["--rm", "--network", "none"]
+  timeout: 120             # per bash command (test suites can be slow)
+  container_timeout: 3h    # `sleep` lifetime of the task container (cleanup backstop)
+  pull_timeout: 900
+model:
+  cost_tracking: ignore_errors
+  model_kwargs:
+    api_key: none
+    drop_params: true
+    parallel_tool_calls: true
+    timeout: 900           # one completion (long thinking at ~80 tok/s fits)

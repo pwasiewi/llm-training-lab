@@ -1,9 +1,18 @@
-outputs/
+# Generic junk only. The public-set whitelist lives in .git/info/exclude of the maintainer's checkout:
+# this directory sits inside a private repo that reads every .gitignore, so rules like "night/" must not live here.
 __pycache__/
 *.pyc
 *.pyo
-.env
-venv/
+.pytest_cache/
 .venv/
-.claude
-.idea
+venv/
+.env
+*.log
+outputs/
+unsloth_compiled_cache/
+vllm_gen_lora/
+wandb/
+*.gguf
+*.safetensors
+.idea/
+.claude/

@@ -26,8 +26,8 @@ os.environ.setdefault("GLOG_minloglevel", "2")          # caffe2/glog: hide INFO
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
-os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")   # flashinfer runtime JIT: nvcc (CUDA 13.3) rejects host gcc-16, -ccbin comes from $CC
-os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
@@ -41,6 +41,7 @@ os.environ.setdefault("UNSLOTH_GPTOSS_GROUPED", "0")
 # ----------------------------------------------------------------------------------
 
 from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
+from lora_precision import base_precision
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
 import re
@@ -57,7 +58,7 @@ lora_rank = 8           # attention-only LoRA needs far less rank than the full-
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
-    load_in_4bit=True,
+    **base_precision("4bit", fast_inference=False),  # LORA_PRECISION=4bit|fp8|bf16
     fast_inference=False,     # no colocated vLLM: 20B does not fit next to training on 16 GB
     offload_embedding=True,   # moves embed_tokens/lm_head off-GPU; part of the ~15 GB recipe
 )

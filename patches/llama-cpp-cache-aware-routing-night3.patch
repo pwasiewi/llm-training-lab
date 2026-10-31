@@ -1,0 +1,380 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index ca0e4d1..935be00 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -2585,6 +2585,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.n_moe_cache_max_batch = value;
+         }
+     ).set_env("LLAMA_ARG_MOE_EXPERT_CACHE_MAX_BATCH"));
++    add_opt(common_arg(
++        {"--moe-cache-route-bonus"}, "F",
++        string_format("cache-aware MoE routing: add F to the top-k selection score (router probability for softmax "
++            "gating) of experts resident in the MoE expert cache, so near-ties go to a resident expert; the mixing "
++            "weights stay unbiased. Decode only, needs --moe-expert-cache. CHANGES MODEL OUTPUT (default: %g = off)",
++            (double) params.moe_cache_route_bonus),
++        [](common_params & params, const std::string & value) {
++            params.moe_cache_route_bonus = std::stof(value);
++        }
++    ).set_env("LLAMA_ARG_MOE_CACHE_ROUTE_BONUS"));
+     if (ex == LLAMA_EXAMPLE_SERVER) {
+         // this is to make sure this option appears in the server-specific section of the help message
+         add_opt(common_arg(
+diff --git a/common/common.cpp b/common/common.cpp
+index 40ba215..5d5bf30 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1642,6 +1642,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
+     cparams.n_moe_cache_max_batch = params.n_moe_cache_max_batch;
+     cparams.n_moe_cache_half_life = params.n_moe_cache_half_life;
+     cparams.n_moe_cache_admit     = params.n_moe_cache_admit;
++    cparams.moe_cache_route_bonus = params.moe_cache_route_bonus;
+     cparams.n_threads         = params.cpuparams.n_threads;
+     cparams.n_threads_batch   = params.cpuparams_batch.n_threads == -1 ?
+                                 params.cpuparams.n_threads : params.cpuparams_batch.n_threads;
+diff --git a/common/common.h b/common/common.h
+index 853f81d..14be063 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -457,6 +457,7 @@ struct common_params {
+     int32_t n_moe_cache_max_batch = 1;    // largest decode batch the cache graph is built for
+     int32_t n_moe_cache_half_life = 16;   // windowed use counter half life in steps (0 = count all time)
+     int32_t n_moe_cache_admit     = 3;    // sightings required in the window before an upload
++    float   moe_cache_route_bonus = 0.0f; // cache-aware routing bonus for resident experts (0 = off, lossy when > 0)
+                                           // 16/3 measured on RTX 3060 + Qwen3.8-Flash-Next IQ3_XXS: 5x less
+                                           // PCIe traffic and +8pp hit rate vs ungated (which churns uploads)
+     int32_t n_keep                =     0; // number of tokens to keep from initial prompt
+diff --git a/include/llama.h b/include/llama.h
+index b674e19..710f55d 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -395,6 +395,8 @@ extern "C" {
+         int32_t  n_moe_cache_max_batch; // largest decode batch the cache graph is built for (see llama-moecache.h)
+         int32_t  n_moe_cache_half_life; // steps between halvings of the windowed use counter (0 = all time)
+         int32_t  n_moe_cache_admit;     // sightings required in the window before an expert is uploaded
++        float    moe_cache_route_bonus; // cache-aware routing: added to the top-k selection score of experts resident
++                                        // in the cache (0 = off; > 0 CHANGES MODEL OUTPUT, mixing weights stay unbiased)
+ 
+         ggml_backend_sched_eval_callback cb_eval;
+         void * cb_eval_user_data;
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 478695f..b573066 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -281,6 +281,16 @@ llama_context::llama_context(
+ 
+     cparams.op_offload = params.op_offload;
+     cparams.prefetch_experts_slots = params.prefetch_experts_slots;
++    cparams.moe_cache_route_bonus  = std::max(0.0f, params.moe_cache_route_bonus);
++    if (cparams.moe_cache_route_bonus > 0.0f) {
++        if (llama_moe_cache_active()) {
++            LLAMA_LOG_WARN("%s: cache-aware MoE routing ON, bonus = %g: experts resident in the expert cache are preferred "
++                    "during decode - THIS CHANGES MODEL OUTPUT\n", __func__, cparams.moe_cache_route_bonus);
++        } else {
++            LLAMA_LOG_WARN("%s: --moe-cache-route-bonus %g ignored: no MoE expert cache is active\n",
++                    __func__, cparams.moe_cache_route_bonus);
++        }
++    }
+     cparams.kv_unified = params.kv_unified;
+ 
+     // initialized later
+@@ -3756,6 +3766,7 @@ llama_context_params llama_context_default_params() {
+         /*.n_moe_cache_max_batch       =*/ 1,
+         /*.n_moe_cache_half_life       =*/ 16,
+         /*.n_moe_cache_admit           =*/ 3,
++        /*.moe_cache_route_bonus       =*/ 0.0f,
+         /*.cb_eval                     =*/ nullptr,
+         /*.cb_eval_user_data           =*/ nullptr,
+         /*.type_k                      =*/ GGML_TYPE_F16,
+diff --git a/src/llama-cparams.h b/src/llama-cparams.h
+index 16c8d30..5ca0299 100644
+--- a/src/llama-cparams.h
++++ b/src/llama-cparams.h
+@@ -57,6 +57,7 @@ struct llama_cparams {
+     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer
+ 
+     int prefetch_experts_slots = 0; // --prefetch-experts-slots: MoE expert H2D staging slots (0 = off, >=2 enables full-tensor lookahead prefetch; capped at 4)
++    float moe_cache_route_bonus = 0.0f; // --moe-cache-route-bonus: selection bonus for cache-resident experts (0 = off)
+ 
+     enum llama_context_type ctx_type;
+     enum llama_rope_scaling_type rope_scaling_type;
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 2164cd4..3fde270 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -2030,6 +2030,54 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     const int64_t n_tokens = cur->ne[1];
+     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
+ 
++    // MoE expert cache (see llama-moecache.h): during decode on a layer whose
++    // experts live in host memory, run a parallel mul_mat_id chain over a
++    // device-resident cache of hot experts. Cached ids are skipped by the CPU
++    // chain (src[3] table) and served by the cache chain; uncached ids map to
++    // the cache's zero slot. The two outputs sum to the exact result.
++    // Decode here means a single token OR a speculative-decoding verification
++    // batch (n_draft + 1 tokens): the split is per (token, expert) pair, so it
++    // is exact for any batch size and composes with --spec-type ngram-mod.
++    // Resolved before the router so cache-aware routing (below) can use it.
++    const llama_moe_cache_layer * mcache = nullptr;
++    if (n_tokens > llama_moe_cache_max_batch() && llama_moe_cache_lookup(up_exps)) {
++        // cacheable layer, but this batch is too wide for the cache chain (usually
++        // a speculative draft batch): count it so the stats can explain a low hit rate
++        llama_moe_cache_note_wide_batch();
++    }
++    if (n_tokens <= llama_moe_cache_max_batch() && !gate_up_exps && gate_exps && down_exps &&
++        !up_exps_b && !gate_exps_b && !down_exps_b &&
++        !up_exps_s && !gate_exps_s && !down_exps_s &&
++        type_op == LLM_FFN_SILU && !weight_before_ffn && loras->empty()) {
++        mcache = llama_moe_cache_lookup(up_exps);
++    }
++
++    // Cache-aware routing (opt-in, --moe-cache-route-bonus F, LOSSY): experts
++    // resident in this layer's cache get +F on the score top-k selects on, so a
++    // resident expert displaces a non-resident one only when the router ranked
++    // them within F of each other. The mixing weights are still gathered from
++    // the unbiased probs. Residency is read from the device table the cache
++    // chain itself uses (written only between graphs), so no host sync is
++    // needed and the bonus can never name an expert the chain does not serve:
++    // slot < n_slots <=> resident, so clamp(n_slots - slot, 0, 1) is the exact
++    // 0/1 residency mask. Expanded here, before the router, so these nodes do
++    // not land between softmax and argsort and the CUDA topk-moe fusion (which
++    // has a "probs + bias" selection variant) still matches.
++    ggml_tensor * route_bonus = nullptr;
++    if (mcache && cparams.moe_cache_route_bonus > 0.0f && selected_experts_in == nullptr &&
++        mcache->dev_table->ne[1] == n_expert) {
++        ggml_tensor * slot = ggml_cast(ctx0, mcache->dev_table, GGML_TYPE_F32); // [1, n_expert]
++        slot = ggml_reshape_2d(ctx0, slot, n_expert, 1);
++        ggml_tensor * resident = ggml_clamp(ctx0, ggml_scale_bias(ctx0, slot, -1.0f, (float) mcache->n_slots), 0.0f, 1.0f);
++        route_bonus = ggml_scale(ctx0, resident, cparams.moe_cache_route_bonus); // [n_expert, 1]
++        cb(route_bonus, "ffn_moe_route_bonus", il);
++        // keep its memory for the whole graph: if the allocator handed it to the
++        // argsort/ids after the add, the fused kernel (which reads it as the bias
++        // while writing ids) would fail its overlap check and fall back to unfused
++        ggml_set_output(route_bonus);
++        ggml_build_forward_expand(gf, route_bonus);
++    }
++
+     ggml_tensor * logits = nullptr;
+ 
+     if (probs_in == nullptr) {
+@@ -2114,6 +2162,13 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(selection_probs, "ffn_moe_probs_masked", il);
+     }
+ 
++    // cache-aware routing: bias the selection only (see route_bonus above)
++    ggml_tensor * selection_unbiased = selection_probs;
++    if (route_bonus) {
++        selection_probs = ggml_add(ctx0, selection_probs, route_bonus); // [n_expert, n_tokens]
++        cb(selection_probs, "ffn_moe_probs_route", il);
++    }
++
+     // select experts
+     ggml_tensor * selected_experts = selected_experts_in;
+     if (selected_experts == nullptr) {
+@@ -2121,6 +2176,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(selected_experts->src[0], "ffn_moe_argsort", il);
+     }
+     cb(selected_experts, "ffn_moe_topk", il);
++    ggml_tensor * selected_route = selected_experts; // before any arch-specific id remap below
+ 
+     if (arch == LLM_ARCH_GROVEMOE && n_expert != hparams.n_expert) {
+         // TODO: Use scalar div instead when/if implemented
+@@ -2165,27 +2221,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     //call early so that topk-moe can be used
+     ggml_build_forward_expand(gf, weights);
+ 
+-    // MoE expert cache (see llama-moecache.h): during decode on a layer whose
+-    // experts live in host memory, run a parallel mul_mat_id chain over a
+-    // device-resident cache of hot experts. Cached ids are skipped by the CPU
+-    // chain (src[3] table) and served by the cache chain; uncached ids map to
+-    // the cache's zero slot. The two outputs sum to the exact result.
+-    // Decode here means a single token OR a speculative-decoding verification
+-    // batch (n_draft + 1 tokens): the split is per (token, expert) pair, so it
+-    // is exact for any batch size and composes with --spec-type ngram-mod.
+-    const llama_moe_cache_layer * mcache = nullptr;
+-    ggml_tensor * mc_slot_ids = nullptr;
+-    if (n_tokens > llama_moe_cache_max_batch() && llama_moe_cache_lookup(up_exps)) {
+-        // cacheable layer, but this batch is too wide for the cache chain (usually
+-        // a speculative draft batch): count it so the stats can explain a low hit rate
+-        llama_moe_cache_note_wide_batch();
+-    }
+-    if (n_tokens <= llama_moe_cache_max_batch() && !gate_up_exps && gate_exps && down_exps &&
+-        !up_exps_b && !gate_exps_b && !down_exps_b &&
+-        !up_exps_s && !gate_exps_s && !down_exps_s &&
+-        type_op == LLM_FFN_SILU && !weight_before_ffn && loras->empty()) {
+-        mcache = llama_moe_cache_lookup(up_exps);
++    // LLAMA_MOE_ROUTE_STATS=N: rank of every selected expert in the unbiased
++    // order (inverse permutation = argsort of the argsort), reduced on the host
++    // by a CPU custom op that rides the decode graph - no extra sync. Debug
++    // only: it reads the unbiased scores outside the topk-moe subgraph, so the
++    // fused kernel is not used while it is on.
++    if (route_bonus && llama_moe_route_stats_every() > 0) {
++        ggml_tensor * order = ggml_argsort(ctx0, selection_unbiased, GGML_SORT_ORDER_DESC); // [n_expert, n_tokens]
++        ggml_tensor * rank  = ggml_argsort(ctx0, ggml_cast(ctx0, order, GGML_TYPE_F32), GGML_SORT_ORDER_ASC);
++        rank = ggml_reshape_3d(ctx0, ggml_cast(ctx0, rank, GGML_TYPE_F32), 1, n_expert, n_tokens);
++        ggml_tensor * sel_rank = ggml_get_rows(ctx0, rank, selected_route); // [1, n_expert_used, n_tokens]
++        cb(sel_rank, "ffn_moe_route_rank", il);
++        ggml_build_forward_expand(gf, ggml_map_custom1(ctx0, sel_rank, llama_moe_route_stats_op, 1, nullptr));
+     }
++
++    ggml_tensor * mc_slot_ids = nullptr;
+     if (mcache) {
+         // ggml_get_rows requires a->ne[2] == b->ne[1], so flatten the [n_expert_used,
+         // n_tokens] id tensor to a 1-row table lookup and restore the shape after -
+diff --git a/src/llama-moecache.cpp b/src/llama-moecache.cpp
+index 2c16441..2a804ad 100644
+--- a/src/llama-moecache.cpp
++++ b/src/llama-moecache.cpp
+@@ -6,6 +6,7 @@
+ #include "ggml.h"
+ #include "ggml-backend.h"
+ 
++#include <algorithm>
+ #include <cinttypes>
+ #include <condition_variable>
+ #include <cstdlib>
+@@ -91,6 +92,16 @@ struct moe_cache {
+ 
+     const llama_model * model = nullptr; // whose tensors the table entries name
+ 
++    // cache-aware routing telemetry (LLAMA_MOE_ROUTE_STATS=N: a WARN line every N
++    // steps, 0 = off). Filled under mtx by llama_moe_route_stats_op, a CPU custom
++    // op in the decode graph that receives the unbiased rank of every selected expert.
++    int32_t  route_stats_every = 0;
++    uint64_t n_route_sel     = 0; // (token, layer) selections seen
++    uint64_t n_route_changed = 0; // ... whose expert set differs from the unbiased top-k
++    uint64_t n_route_swaps   = 0; // experts selected from outside the unbiased top-k
++    uint64_t n_route_rank    = 0; // sum of their 1-based ranks in the unbiased order
++    uint64_t rp_route_sel = 0, rp_route_changed = 0, rp_route_swaps = 0, rp_route_rank = 0;
++
+     // optional routing trace (LLAMA_MOE_CACHE_TRACE=<path>): one line per layer
+     // per graph execution, "<step> <layer> <n_tokens> <ids...>", used offline to
+     // evaluate eviction policies against real routing
+@@ -574,6 +585,10 @@ void llama_moe_cache_init(const llama_model & model, int32_t n_slots, int32_t ma
+         LLAMA_LOG_INFO("%s: MoE expert cache prefill D2D sourcing %s (resident experts of an offloaded batch are copied "
+                 "from their cache slot instead of from host)\n", __func__, mc->prefill_d2d ? "enabled" : "disabled by LLAMA_MOE_CACHE_PREFILL_D2D=0");
+ 
++        if (const char * v = getenv("LLAMA_MOE_ROUTE_STATS")) {
++            mc->route_stats_every = std::max(0, atoi(v));
++        }
++
+         if (const char * v = getenv("LLAMA_MOE_CACHE_VERIFY")) {
+             mc->verify = atoi(v);
+             if (mc->verify > 0) {
+@@ -652,6 +667,24 @@ const llama_moe_cache_layer * llama_moe_cache_lookup(const ggml_tensor * up_exps
+     return &g_cache->layers[it->second].pub;
+ }
+ 
++// one cache-aware routing line: the interval since the last line and the run total
++// (caller holds mc->mtx). Silent until --moe-cache-route-bonus has changed a graph.
++static void route_stats_report(moe_cache * mc) {
++    if (mc->n_route_sel == 0) {
++        return;
++    }
++    const uint64_t ds = mc->n_route_sel - mc->rp_route_sel, dc = mc->n_route_changed - mc->rp_route_changed;
++    const uint64_t dw = mc->n_route_swaps - mc->rp_route_swaps, dr = mc->n_route_rank - mc->rp_route_rank;
++    LLAMA_LOG_WARN("moe-route: steps=%" PRIu64 " selections=%" PRIu64 " changed=%.2f%% swapped-in=%" PRIu64
++            " mean-unbiased-rank=%.2f | window: selections=%" PRIu64 " changed=%.2f%% swapped-in=%" PRIu64
++            " mean-unbiased-rank=%.2f\n",
++            mc->n_steps, mc->n_route_sel, 100.0*mc->n_route_changed/mc->n_route_sel, mc->n_route_swaps,
++            mc->n_route_swaps ? (double) mc->n_route_rank/mc->n_route_swaps : 0.0,
++            ds, ds ? 100.0*dc/ds : 0.0, dw, dw ? (double) dr/dw : 0.0);
++    mc->rp_route_sel = mc->n_route_sel; mc->rp_route_changed = mc->n_route_changed;
++    mc->rp_route_swaps = mc->n_route_swaps; mc->rp_route_rank = mc->n_route_rank;
++}
++
+ void llama_moe_cache_step(ggml_backend_sched * sched) {
+     moe_cache * mc = g_cache;
+     if (!mc) {
+@@ -752,6 +785,10 @@ void llama_moe_cache_step(ggml_backend_sched * sched) {
+         verify_tables(mc);
+     }
+ 
++    if (mc->route_stats_every > 0 && mc->n_steps % mc->route_stats_every == 0) {
++        route_stats_report(mc);
++    }
++
+     // at --log-verbosity 4 (trace) DEBUG is suppressed, so report at INFO on step 1
+     // (existence) and step 32 (a warmed hit rate), then every 256 steps - which is
+     // roughly per request at server token rates - so a long-lived server keeps
+@@ -793,6 +830,49 @@ int llama_moe_cache_max_batch() {
+     return g_cache ? g_cache->max_batch : 1;
+ }
+ 
++bool llama_moe_cache_active() {
++    return g_cache != nullptr;
++}
++
++int llama_moe_route_stats_every() {
++    return g_cache ? g_cache->route_stats_every : 0;
++}
++
++void llama_moe_route_stats_op(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata) {
++    GGML_UNUSED(dst);
++    GGML_UNUSED(nth);
++    GGML_UNUSED(userdata);
++    moe_cache * mc = g_cache;
++    if (!mc || ith != 0) {
++        return;
++    }
++    GGML_ASSERT(a->type == GGML_TYPE_F32 && a->ne[0] == 1);
++
++    // a: [1, n_expert_used, n_tokens], the 0-based unbiased rank of each selected
++    // expert; a rank >= n_expert_used is an expert the bonus pulled into the top-k
++    const int64_t k = a->ne[1];
++    uint64_t sel = 0, changed = 0, swaps = 0, rank = 0;
++    for (int64_t t = 0; t < a->ne[2]; ++t) {
++        uint64_t sw = 0;
++        for (int64_t i = 0; i < k; ++i) {
++            const float r = *(const float *) ((const char *) a->data + i*a->nb[1] + t*a->nb[2]);
++            if (r >= (float) k) {
++                sw++;
++                rank += (uint64_t) r + 1;
++            }
++        }
++        sel++;
++        changed += sw > 0;
++        swaps   += sw;
++    }
++
++    std::lock_guard<std::mutex> lock(mc->mtx);
++    mc->n_route_sel     += sel;
++    mc->n_route_changed += changed;
++    mc->n_route_swaps   += swaps;
++    mc->n_route_rank    += rank;
++}
++
+ bool llama_moe_cache_expert_src(const ggml_tensor * weight, const ggml_tensor ** cache, int32_t * slot, int64_t n_expert, void * user_data) {
+     GGML_UNUSED(user_data);
+     moe_cache * mc = g_cache;
+@@ -869,6 +949,10 @@ void llama_moe_cache_print_stats() {
+     LLAMA_LOG_INFO("%s: MoE expert cache prefill D2D: %s, weight-resolves=%" PRIu64 " resident-entries=%" PRIu64
+             " (experts of offloaded batches sourced from VRAM instead of host, upper bound)\n",
+             __func__, mc->prefill_d2d ? "on" : "off", mc->n_prefill_resolves, mc->n_prefill_resident);
++    if (mc->route_stats_every > 0) {
++        std::lock_guard<std::mutex> lock(mc->mtx);
++        route_stats_report(mc);
++    }
+     if (mc->n_skip_wide_batch) {
+         LLAMA_LOG_INFO("%s: MoE expert cache bypassed on %" PRIu64 " steps: batch wider than --moe-expert-cache-max-batch (%d), "
+                 "e.g. speculative decoding drafts. The cache cannot be used for those tokens.\n",
+diff --git a/src/llama-moecache.h b/src/llama-moecache.h
+index b070457..be25026 100644
+--- a/src/llama-moecache.h
++++ b/src/llama-moecache.h
+@@ -95,3 +95,16 @@ bool llama_moe_cache_expert_src(const ggml_tensor * weight, const ggml_tensor **
+ 
+ // log cumulative cache statistics (safe to call at any time; no-op when disabled)
+ void llama_moe_cache_print_stats();
++
++// true once the cache serves at least one layer (init succeeded)
++bool llama_moe_cache_active();
++
++// Cache-aware routing telemetry (--moe-cache-route-bonus). LLAMA_MOE_ROUTE_STATS=N
++// logs, at WARN every N steps, the share of (token, layer) selections the bonus
++// changed and the mean 1-based rank, in the unbiased order, of the experts it
++// pulled into the top-k. 0 (default) = off, and then the graph has no stats nodes.
++int llama_moe_route_stats_every();
++
++// ggml_custom1_op_t for the decode graph: a = F32 [1, n_expert_used, n_tokens],
++// the 0-based unbiased rank of each selected expert. Runs on the CPU backend.
++void llama_moe_route_stats_op(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata);

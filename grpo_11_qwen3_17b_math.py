@@ -12,12 +12,16 @@
 #
 #   GRPO_TAG=e0            run name -> outputs/lora-grpo-qwen3-17b-math-<tag>
 #   GRPO_G=4               num_generations (== generation_batch_size; 16 GB rule)
-#   GRPO_LOSS=bnpo         grpo | dr_grpo | dapo | bnpo | cispo | sapo. NOT dapo by default: unsloth's
+#   GRPO_LOSS=bnpo         grpo | dr_grpo | dapo | bnpo | cispo | sapo (+ luspo/vespo, need GRPO_IS_LEVEL=sequence). NOT dapo by default: unsloth's
 #                          patched GRPOConfig FORCES mask_truncated_completions=True for dapo ("we will
 #                          set it"), and its dapo normaliser (num_items_in_batch) has no clamp, so a
 #                          group whose G completions are all truncated = 0 valid tokens = 0/0 -> NaN
 #                          loss + non-finite LoRA grads (NAN-WATCH, smoke7 2026-09-08). bnpo = the same
 #                          token-level loss normalised per micro-batch WITH clamp(min=1), no forced mask.
+#                          2026-10-19 (unsloth/zoo 2026.10.6): BOTH halves of that mechanism are gone upstream -
+#                          the forced mask now applies only to an EXPLICIT dapo, and zoo grpo_compute_loss clamps
+#                          the dapo/bnpo/cispo/vespo normaliser at 1. bnpo now also uses the GLOBAL token count
+#                          (num_items_in_batch) like dapo, so bnpo ~= dapo here. Default kept at bnpo (no re-test).
 #   GRPO_BETA=0            KL coefficient (0 = no ref forward, no zero-std KL leak)
 #   GRPO_SCALE=batch       scale_rewards: group | batch | none
 #   GRPO_LR=4e-6           learning rate (proven healthy at alpha == rank)
@@ -41,6 +45,10 @@
 #   GRPO_ANOMALY=0         1 = torch.autograd.set_detect_anomaly (USELESS here: collides with the
 #                          unsloth torch.compile path, GuardOnDataDependentSymNode at step 1)
 #   GRPO_LORA_ROLLOUT=1    1 = hand the live LoRA adapter to the vLLM rollout engine (BUG FIX, see below).
+#                          2026-10-19: unsloth 2026.10.6 now injects the adapter itself (runtime wrapper in
+#                          rl_replacements.py vllm_generation_init_patch); probe: 12/12 engine calls carried a
+#                          lora_request with this knob at 0. Kept on as belt-and-braces (upstream skips a call
+#                          that already has one), so the cache grep detector reads 0 and is obsolete.
 #                          0 = reproduce the broken behaviour (rollouts from the frozen base model).
 #   GRPO_NANWATCH=0        1 = wrap the compiled grpo_accumulated_loss: on a non-finite loss dump the
 #                          batch to /tmp/grpo11_nan_<n>.pt and re-run a clean no-grad forward to
@@ -52,6 +60,27 @@
 #                          endpoint. 200 items costs ~2-4 min. A 500-item endpoint eval has a
 #                          +-3 pp binomial half-width, too blunt for a 200-step run.
 #   GRPO_DEVN=200          dev slice size
+#   --- passthrough knobs added 2026-10-19 (trl 1.10.0.dev0 / peft 0.20.1.dev0); unset = today's behaviour ---
+#   GRPO_IS_LEVEL=         importance_sampling_level: token (TRL default) | sequence (GSPO). Not passed when unset.
+#                          NB at GRPO_ITERS=1 (on-policy) sequence == token exactly; GSPO needs GRPO_ITERS>=2.
+#   GRPO_VLLM_IS_MODE=     vllm_importance_sampling_mode: token_truncate | token_mask | sequence_truncate |
+#                          sequence_mask (TRL default). Not passed when unset.
+#   (no top_entropy_quantile knob: unsloth_zoo _warn_unsupported_grpo_options says its loss path ignores it)
+#   GRPO_RSLORA=0          1 = use_rslora (scale alpha/sqrt(r) instead of alpha/r: x4 at r=16 -> retune lr)
+#   GRPO_SEED=             (2026-10-20) one seed for LoRA init, data shuffle and the Trainer; unset = 3407/3407/TRL default (g1)
+#   GRPO_SLEEP=0           (2026-10-20) 1 = vllm_enable_sleep_mode (offload vLLM during the optimizer step; for G=8 on 16 GB)
+#   --- run hygiene, 2026-10-20 (llm/research/grpo-improvements-20261020.md, ideas from Kauldron) ---
+#   GRPO_SEED= now a ROOT seed: lora_init / data_order / trainer seeds are derived from it (grpo_runlib.derive_seed),
+#                          so they are independent. Unset = the g1 values (3407 / 3407 / TRL default) exactly.
+#   GRPO_SEED_INIT= GRPO_SEED_DATA= GRPO_SEED_TRAINER=  override one stream (vary one, hold the others)
+#   GRPO_SMOKE=0           1 = 3 steps, no checkpoints, no dev eval, no merge; then assert finite grads, a moving
+#                          adapter and a live adapter in the rollouts; exit 3 on failure (queue gate)
+#   GRPO_RESUME=0          auto = resume from the newest <run>-outputs/checkpoint-* (UNVERIFIED with colocated vLLM:
+#                          check the first rollouts after a resume)
+#   GRPO_DEVK=0            dev eval: 0 = one greedy pass (old); K>0 = K samples per item at T=0.6 with per-item seeds
+#   GRPO_STATS_EVERY=50    every N steps log the bf16 survival of the LoRA update (live merge-fidelity) to metrics.jsonl
+#   Every run writes <run>-outputs/run.json (config, overrides, env, git, package versions, file hashes, status)
+#   and <run>-outputs/metrics.jsonl (train logs, tripwire, bf16 stats, dev eval). Unknown GRPO_* variables abort.
 #
 # Inherits every runtime fix of grpo_10 (Qwen3-1.7B bf16 both sides = bug (a) fix,
 # alpha == rank + HF gradient checkpointing, generation_batch_size == G, chunked
@@ -67,8 +96,8 @@ os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")   # flashinfer JIT: nvcc rejects gcc-16
-os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
@@ -78,11 +107,14 @@ import re
 import torch
 torch.backends.cuda.enable_flash_sdp(True)
 from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
+from lora_precision import base_precision
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
 from datasets import load_dataset, Dataset
 from tqdm import tqdm
 from math_verify import parse, verify, LatexExtractionConfig
+import grpo_runlib as RL
+from grpo_11_task import SYSTEM_PROMPT, USER_TEMPLATE, last_boxed, is_correct, build_prompt, TASK_SHA
 
 os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
 os.environ["VLLM_USE_V1"] = "0"
@@ -120,6 +152,45 @@ MAX_STEPS    = _env("GRPO_MAX_STEPS", -1, int)
 PRINT_EVERY  = _env("GRPO_PRINT_EVERY", 20, int)
 DEVEVAL      = _env("GRPO_DEVEVAL", 0, int)
 DEVN         = _env("GRPO_DEVN", 200, int)
+# 2026-10-19 passthrough knobs: only forwarded when set, so an unset knob keeps the installed default.
+IS_LEVEL     = _env("GRPO_IS_LEVEL", "")
+VLLM_IS_MODE = _env("GRPO_VLLM_IS_MODE", "")
+RSLORA       = _env("GRPO_RSLORA", 0, int) == 1
+SEED         = _env("GRPO_SEED", "")
+SLEEP        = _env("GRPO_SLEEP", 0, int) == 1
+SMOKE        = _env("GRPO_SMOKE", 0, int) == 1
+RESUME       = _env("GRPO_RESUME", "0")
+DEVK         = _env("GRPO_DEVK", 0, int)
+STATS_EVERY  = _env("GRPO_STATS_EVERY", 50, int)
+RL.check_env({"GRPO_TAG", "GRPO_G", "GRPO_LOSS", "GRPO_BETA", "GRPO_SCALE", "GRPO_LR", "GRPO_ITERS",
+              "GRPO_EPS_HIGH", "GRPO_MAXLEN", "GRPO_MASK_TRUNC", "GRPO_LEVELS", "GRPO_PASS_FILTER",
+              "GRPO_STEP", "GRPO_W_STEP", "GRPO_OVERLONG", "GRPO_AGG", "GRPO_VLLM_IS", "GRPO_CHUNK",
+              "GRPO_ANOMALY", "GRPO_NANWATCH", "GRPO_LORA_ROLLOUT", "GRPO_MAX_STEPS", "GRPO_PRINT_EVERY",
+              "GRPO_DEVEVAL", "GRPO_DEVN", "GRPO_IS_LEVEL", "GRPO_VLLM_IS_MODE", "GRPO_RSLORA", "GRPO_SEED",
+              "GRPO_SLEEP", "GRPO_SMOKE", "GRPO_RESUME", "GRPO_DEVK", "GRPO_STATS_EVERY",
+              "GRPO_SEED_INIT", "GRPO_SEED_DATA", "GRPO_SEED_TRAINER"})
+# Seed streams (M2): unset GRPO_SEED keeps the g1 values; a root seed derives independent streams.
+SEED_INIT    = _env("GRPO_SEED_INIT", RL.derive_seed(SEED, "lora_init") if SEED != "" else 3407, int)
+SEED_DATA    = _env("GRPO_SEED_DATA", RL.derive_seed(SEED, "data_order") if SEED != "" else 3407, int)
+SEED_TRAINER = _env("GRPO_SEED_TRAINER", RL.derive_seed(SEED, "trainer") if SEED != "" else None, int)
+_smoke_patches = {}
+if SMOKE:
+    # Kauldron-style smoke preset: every changed knob is recorded in run.json.
+    if MAX_STEPS < 0 or MAX_STEPS > 3:
+        _smoke_patches["max_steps"] = (MAX_STEPS, 3); MAX_STEPS = 3
+    if DEVEVAL:
+        _smoke_patches["deveval"] = (DEVEVAL, 0); DEVEVAL = 0
+    _smoke_patches["save_strategy"] = ("steps", "no")
+    _smoke_patches["merge"] = (True, False)
+_extra_cfg = {}
+if SEED_TRAINER is not None:
+    _extra_cfg["seed"] = SEED_TRAINER
+if SLEEP:
+    _extra_cfg["vllm_enable_sleep_mode"] = True
+if IS_LEVEL:
+    _extra_cfg["importance_sampling_level"] = IS_LEVEL
+if VLLM_IS_MODE:
+    _extra_cfg["vllm_importance_sampling_mode"] = VLLM_IS_MODE
 
 model_name = "Qwen/Qwen3-1.7B"
 model_path = f"outputs/lora-grpo-qwen3-17b-math-{TAG}"
@@ -129,13 +200,18 @@ lora_rank = 16
 
 print(f"[grpo_11] tag={TAG} G={G} loss={LOSS} beta={BETA} scale={SCALE} lr={LR} iters={ITERS} "
       f"eps_high={EPS_HIGH} maxlen={MAXLEN} levels={sorted(LEVELS)} passfilter={PASS_FILTER or "-"} step={USE_STEP}(w={W_STEP}) "
-      f"overlong={USE_OVERLONG} agg={AGG} mask_trunc={MASK_TRUNC} vllm_is={VLLM_IS} chunk={CHUNK} anomaly={ANOMALY} lora_rollout={LORA_ROLLOUT} max_steps={MAX_STEPS}", flush=True)
+      f"overlong={USE_OVERLONG} agg={AGG} mask_trunc={MASK_TRUNC} vllm_is={VLLM_IS} chunk={CHUNK} anomaly={ANOMALY} lora_rollout={LORA_ROLLOUT} max_steps={MAX_STEPS} "
+      f"rslora={RSLORA} extra_cfg={_extra_cfg} seeds(init/data/trainer)={SEED_INIT}/{SEED_DATA}/{SEED_TRAINER} "
+      f"smoke={SMOKE}{_smoke_patches or ''} resume={RESUME} devk={DEVK} task_sha={TASK_SHA}", flush=True)
+RUN_DIR = f"{model_path}-outputs"
+METRICS = RL.MetricsLog(RUN_DIR)
+SMOKECHK = RL.SmokeCheck()
 
 # ---------------- model ----------------
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
-    load_in_4bit=False,  # bf16 both sides — bug (a) fix (grpo_10 header)
+    **base_precision("bf16", fast_inference=True),  # bf16 both sides = bug (a) fix (grpo_10 header); LORA_PRECISION overrides
     attn_implementation="flash_attention_2",
     device_map="auto",
     fast_inference=True,
@@ -150,30 +226,12 @@ model = FastLanguageModel.get_peft_model(
                     "gate_proj", "up_proj", "down_proj"],
     lora_alpha=lora_rank,             # s=1: bug (c) era invariant, kept deliberately
     use_gradient_checkpointing=True,  # HF per-layer GC; "unsloth" offload GC -> NaN grads
-    random_state=3407,
+    use_rslora=RSLORA,                # 2026-10-19 knob GRPO_RSLORA; False = unsloth default
+    random_state=SEED_INIT,
 )
 
 # ---------------- data ----------------
-_GOLD_CFG = [LatexExtractionConfig(boxed_match_priority=0)]
-
-def last_boxed(s: str) -> str | None:
-    """Return the content of the last \\boxed{...} in s (brace-balanced), or None."""
-    i = s.rfind("\\boxed")
-    if i < 0:
-        return None
-    j = s.find("{", i)
-    if j < 0:
-        return None
-    depth, k = 0, j
-    while k < len(s):
-        if s[k] == "{":
-            depth += 1
-        elif s[k] == "}":
-            depth -= 1
-            if depth == 0:
-                return s[j + 1:k]
-        k += 1
-    return None
+# _GOLD_CFG, last_boxed, SYSTEM_PROMPT, USER_TEMPLATE, is_correct: grpo_11_task.py (shared with the eval).
 
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
@@ -189,18 +247,11 @@ def gold_numbers(solution: str, final: str) -> list[str]:
         out.append(n)
     return out
 
-SYSTEM_PROMPT = "You are a careful math solver."
-USER_TEMPLATE = ("/no_think\n\nSolve the problem step by step. "
-                 "Put the final answer in \\boxed{}.\n\nProblem:\n{problem}")
-
 def build_dataset() -> Dataset:
     data = load_dataset("DigitalLearningGmbH/MATH-lighteval")["train"]
     data = data.filter(lambda x: x["level"] in LEVELS)
     data = data.map(lambda x: {
-        "prompt": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": USER_TEMPLATE.replace("{problem}", x["problem"])},
-        ],
+        "prompt": build_prompt(x["problem"]),
         "answer": last_boxed(x["solution"]),
         "gold_nums": gold_numbers(x["solution"], last_boxed(x["solution"])),
     })
@@ -210,7 +261,7 @@ def build_dataset() -> Dataset:
         s = tokenizer.apply_chat_template(x["prompt"], tokenize=False, add_generation_prompt=True)
         return len(tokenizer(s)["input_ids"]) <= max_prompt_length
     data = data.filter(_fits)
-    data = data.shuffle(seed=3407)
+    data = data.shuffle(seed=SEED_DATA)
     if PASS_FILTER:
         import json as _json
         keep = {}
@@ -241,35 +292,6 @@ def _progress():
     if st is not None and st.epoch is not None:
         s += f" | step {st.global_step}/{st.max_steps} | epoch {st.epoch:.3f}"
     return s
-
-def is_correct(text: str, gold_boxed: str) -> tuple[float, str]:
-    """1.0 if math_verify says the completion's answer equals the gold boxed answer.
-    Hedging gate: two DIFFERENT boxed answers -> 0 (math_verify would silently take the last).
-    Returns (reward, status) with status in {ok, wrong, hedged, unparsed}."""
-    boxed = re.findall(r"\\boxed\s*{", text)
-    if len(boxed) > 1:
-        contents = set()
-        s = text
-        while True:
-            b = last_boxed(s)
-            if b is None:
-                break
-            contents.add(b.replace(" ", ""))
-            s = s[:s.rfind("\\boxed")]
-        if len(contents) > 1:
-            return 0.0, "hedged"
-    try:
-        pred = parse(text)
-    except Exception:
-        pred = []
-    if not pred:
-        return 0.0, "unparsed"
-    try:
-        gold = parse(f"$\\boxed{{{gold_boxed}}}$", extraction_config=_GOLD_CFG)
-        ok = verify(gold, pred)
-    except Exception:
-        ok = False
-    return (1.0, "ok") if ok else (0.0, "wrong")
 
 def correct_reward(prompts, completions, answer, **kwargs):
     responses = [c[0]["content"] for c in completions]
@@ -354,11 +376,12 @@ training_args = GRPOConfig(
     multi_objective_aggregation=AGG,
     num_train_epochs=1,
     max_steps=MAX_STEPS,
-    save_strategy="steps",
+    save_strategy="no" if SMOKE else "steps",
     save_steps=50,
     max_grad_norm=0.1,
     report_to="none",
     output_dir=f"{model_path}-outputs",
+    **_extra_cfg,                     # 2026-10-19 passthrough knobs (empty unless GRPO_IS_LEVEL etc. are set)
 )
 
 trainer = GRPOTrainer(
@@ -381,12 +404,21 @@ def _integrity_tripwire(optimizer, *args, **kwargs):
             f"[TRIPWIRE] |B|max={b_max:.3e} at step {_tw_step['n']} — bug (c) aliased-buffer "
             "LoRA scaling regression; check lora_alpha == lora_rank and "
             "unsloth_zoo vllm_utils.load_lora_directly.")
-    if _tw_step["n"] <= 10 or _tw_step["n"] % 25 == 0:
+    if SMOKE or _tw_step["n"] <= 10 or _tw_step["n"] % 25 == 0:
         nonfinite = sum(1 for _, p in _lora_B if p.grad is not None and not torch.isfinite(p.grad).all())
         gmax = max((p.grad.abs().max().item() for _, p in _lora_B
                     if p.grad is not None and torch.isfinite(p.grad).all()), default=0.0)
         print(f"[TRIPWIRE step {_tw_step['n']}] |B|max={b_max:.3e} grad|max={gmax:.3e} "
               f"non-finite(B grads)={nonfinite}/{len(_lora_B)}", flush=True)
+        METRICS.write("tripwire", _tw_step["n"], b_max=b_max, grad_max=gmax,
+                      nonfinite=nonfinite, n_tensors=len(_lora_B))
+        SMOKECHK.tripwire(nonfinite, b_max)
+    if STATS_EVERY > 0 and (_tw_step["n"] % STATS_EVERY == 0 or (SMOKE and _tw_step["n"] == 1)):
+        st = RL.bf16_update_stats(model)
+        if st:
+            METRICS.write("bf16", _tw_step["n"], **st)
+            print(f"[BF16 step {_tw_step['n']}] update surviving a bf16 merge: {st['bf16_survive_frac']:.1%} "
+                  f"(median |dW|/half-ULP {st['bf16_ratio_median']:.3f}, {st['bf16_modules']} modules)", flush=True)
 
 from torch.optim.optimizer import register_optimizer_step_pre_hook
 register_optimizer_step_pre_hook(_integrity_tripwire)
@@ -421,17 +453,28 @@ if LORA_ROLLOUT:
     _lora_dir = os.path.join(f"{model_path}-outputs", "_vllm_lora")
     os.makedirs(_lora_dir, exist_ok=True)
     _orig_generate = _llm.generate
-    _lora_calls = {"n": 0}
+    # n = every rollout call that reached the engine WITH an adapter; "upstream" = unsloth attached it
+    # (2026.10: VLLMGeneration.generate re-binds llm.generate around this wrapper and injects
+    # lora_request itself, so "mine" stays 0 on a healthy run - the smoke of 2026-10-21 counted
+    # only "mine" and reported a false "adapter never reached vLLM"), "mine" = this wrapper did.
+    _lora_calls = {"n": 0, "mine": 0, "upstream": 0, "none": 0}
 
     def _generate_with_lora(*a, **kw):
         if kw.get("lora_request") is None:
             # load_tensors=True reads the LIVE state_dict and ships clones (dealias patch),
             # and bumps the vLLM LoRA request id each call so nothing is served from cache.
             kw["lora_request"] = model.load_lora(_lora_dir, load_tensors=True)
+            _lora_calls["mine"] += 1
+        else:
+            _lora_calls["upstream"] += 1
+        if kw.get("lora_request") is None:
+            _lora_calls["none"] += 1          # cannot happen unless load_lora returns None
+        else:
             _lora_calls["n"] += 1
         return _orig_generate(*a, **kw)
 
     _llm.generate = _generate_with_lora
+    SMOKECHK.lora_calls = 0
     print(f"[grpo_11] LoRA-in-rollouts fix armed on {type(_llm).__name__}.generate", flush=True)
 else:
     print("[grpo_11] WARNING: GRPO_LORA_ROLLOUT=0 — rollouts come from the BASE model (broken baseline)", flush=True)
@@ -523,6 +566,11 @@ if DEVEVAL > 0:
         tokenize=False, add_generation_prompt=True) for x in _dev]
     _dev_gold = list(_dev["answer"])
     _dev_hist = []
+    _dev_done = set()
+    _dev_file = f"{model_path}-outputs/deveval_items.jsonl"
+    if RESUME == "auto" and os.path.isfile(_dev_file):
+        import json as _jj
+        _dev_done = {_jj.loads(l)["step"] for l in open(_dev_file) if l.strip()}
 
     class DevEval(TrainerCallback):
         def _run(self, step):
@@ -532,20 +580,31 @@ if DEVEVAL > 0:
             # every later point has to be compared against a number from a different run.
             lr_req = (model.load_lora(_lora_dir, load_tensors=True)
                       if LORA_ROLLOUT and step > 0 else None)
-            outs = engine.generate(_dev_prompts,
-                                   _SP(temperature=0.0, max_tokens=MAXLEN),
-                                   lora_request=lr_req, use_tqdm=False)
-            hits = [is_correct(o.outputs[0].text, g)[0] for o, g in zip(outs, _dev_gold)]
+            if step in _dev_done:
+                return                      # resumed run: this point is already in deveval_items.jsonl
+            if DEVK > 0:
+                # K samples per item, one derived seed per item: the draw depends on the item, not the batch.
+                sps = [_SP(n=DEVK, temperature=0.6, top_p=0.95, max_tokens=MAXLEN,
+                           seed=RL.derive_seed("deveval", i)) for i in range(len(_dev_prompts))]
+                outs = engine.generate(_dev_prompts, sps, lora_request=lr_req, use_tqdm=False)
+                hits = [sum(is_correct(c.text, g)[0] for c in o.outputs) / DEVK
+                        for o, g in zip(outs, _dev_gold)]
+            else:
+                outs = engine.generate(_dev_prompts,
+                                       _SP(temperature=0.0, max_tokens=MAXLEN),
+                                       lora_request=lr_req, use_tqdm=False)
+                hits = [is_correct(o.outputs[0].text, g)[0] for o, g in zip(outs, _dev_gold)]
             ok = sum(hits)
             acc = ok / len(_dev_gold)
             _dev_hist.append((step, acc))
             # Per-item hits, so two points can be compared with an exact PAIRED test later
             # (aggregate accuracies only support the far weaker unpaired comparison).
             import json as _j
-            with open(f"{model_path}-outputs/deveval_items.jsonl", "a") as f:
-                f.write(_j.dumps({"step": step, "acc": acc,
-                                  "hits": [int(x) for x in hits]}) + "\n")
-            print(f"[DEVEVAL step {step}] MATH-500[:{DEVN}] greedy acc = "
+            with open(_dev_file, "a") as f:
+                f.write(_j.dumps({"step": step, "acc": acc, "k": DEVK or 1,
+                                  "hits": [round(float(x), 4) for x in hits]}) + "\n")
+            METRICS.write("deveval", step, acc=acc, n=len(_dev_gold), k=DEVK or 1)
+            print(f"[DEVEVAL step {step}] MATH-500[:{DEVN}] {'k=%d mean' % DEVK if DEVK else 'greedy'} acc = "
                   f"{ok}/{len(_dev_gold)} = {acc:.2%}   history={[(s, round(a, 4)) for s, a in _dev_hist]}",
                   flush=True)
 
@@ -560,7 +619,41 @@ if DEVEVAL > 0:
     print(f"[grpo_11] dev eval armed: every {DEVEVAL} steps on {DEVN} MATH-500 items", flush=True)
 # --- end dev eval ---
 
-trainer.train()
+trainer.add_callback(RL.metrics_callback(METRICS))
+_ckpts = sorted((d for d in os.listdir(RUN_DIR) if d.startswith("checkpoint-")),
+                key=lambda d: int(d.split("-")[1])) if os.path.isdir(RUN_DIR) else []
+_resume = bool(RESUME == "auto" and _ckpts and not SMOKE)
+_cfg = {k: v for k, v in globals().items()
+        if k.isupper() and not k.startswith("_") and isinstance(v, (int, float, str, bool, type(None)))}
+_cfg["LEVELS"] = sorted(LEVELS)
+RL.write_manifest(
+    RUN_DIR, script=__file__, config=_cfg,
+    defaults={"G": 4, "LOSS": "bnpo", "BETA": 0.0, "SCALE": "batch", "LR": 4e-6, "ITERS": 1, "MAXLEN": 2048,
+              "STEP": False, "W_STEP": 0.5, "AGG": "normalize_then_sum", "VLLM_IS": True, "MAX_STEPS": -1,
+              "DEVEVAL": 0, "DEVN": 200, "SEED_INIT": 3407, "SEED_DATA": 3407, "SEED_TRAINER": None},
+    hashed_files={"pass_filter": PASS_FILTER or None,
+                  "task_module": os.path.join(os.path.dirname(os.path.abspath(__file__)), "grpo_11_task.py")},
+    extra={"model_name": model_name, "task_sha": TASK_SHA, "reward_funcs": [f.__name__ for f in reward_funcs],
+           "reward_weights": reward_weights, "train_prompts": len(dataset), "smoke_patches": _smoke_patches,
+           "resumed_from": _ckpts[-1] if _resume else None},
+)
+if _resume:
+    print(f"[grpo_11] RESUMING from {_ckpts[-1]} (UNVERIFIED path: check that the first rollouts carry the adapter)",
+          flush=True)
+try:
+    trainer.train(resume_from_checkpoint=True if _resume else None)
+except BaseException as e:
+    RL.update_manifest(RUN_DIR, status=f"failed: {type(e).__name__}: {e}"[:500],
+                       global_step=trainer.state.global_step)
+    raise
+if LORA_ROLLOUT:
+    SMOKECHK.lora_calls = _lora_calls["n"]
+    print(f"[grpo_11] rollout generate calls with adapter: {_lora_calls}", flush=True)
+RL.update_manifest(RUN_DIR, status="trained", global_step=trainer.state.global_step,
+                   lora_calls=dict(_lora_calls), reward_calls=dict(_calls))
+if SMOKE:
+    SMOKECHK.verdict(RUN_DIR)       # exits 3 on any failed assertion
+    os._exit(0)                     # smoke: no adapter save, no merge
 print(f"[grpo_11] reward-call summary: calls={_calls['n']} hedged={_calls['hedged']} unparsed={_calls['unparsed']}", flush=True)
 
 # bug (d): never merge in-process while vLLM is alive. Save the adapter, merge offline.
@@ -575,3 +668,4 @@ subprocess.run(
      model_path, "adapter-final", "--base", model_name],
     check=True,
 )
+RL.update_manifest(RUN_DIR, status="done", adapter=final_adapter)

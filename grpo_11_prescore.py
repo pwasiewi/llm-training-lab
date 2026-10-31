@@ -28,9 +28,8 @@ import re
 
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-# flashinfer JIT: nvcc (CUDA 13.3) refuses host gcc > 15 and takes -ccbin from $CC
-os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")
-os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
 
 SYSTEM_PROMPT = "You are a careful math solver."
 USER_TEMPLATE = ("/no_think\n\nSolve the problem step by step. "

@@ -1,0 +1,9 @@
+paired items: 500
+A eval_math500_base.jsonl: 70.20%
+B eval_math500_g1.jsonl: 70.80%   delta +0.60 pp
+discordant: A-only-right 29, B-only-right 32, exact McNemar p = 0.7982
+  1: n=43 A 97.7% B 97.7%
+  2: n=90 A 82.2% B 83.3%
+  3: n=105 A 81.9% B 80.0%
+  4: n=128 A 69.5% B 68.0%
+  5: n=134 A 44.8% B 49.3%

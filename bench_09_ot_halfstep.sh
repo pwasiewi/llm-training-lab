@@ -129,7 +129,7 @@ fit_probe() {
 		sleep 5
 	done
 	echo "--- what --fit chose (from the server log):"
-	grep -iE 'fit|n_cpu_moe|n_gpu_layers|override|CPU buffer|CUDA0 model buffer|KV self size' "$logfile" | head -30
+	grep -iE 'fit|n_cpu_moe|n_gpu_layers|override|CPU buffer|CUDA0 model buffer|KV self size' "$logfile" | sed -n '1,30p'   # sed drains the pipe: head -30 = SIGPIPE 141 under pipefail (Bolt, 10-29)
 	echo "--- VRAM now:"; nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
 	kill "$spid" 2>/dev/null || true; wait "$spid" 2>/dev/null || true
 	trap - EXIT

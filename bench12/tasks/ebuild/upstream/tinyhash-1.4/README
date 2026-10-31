@@ -1,0 +1,3 @@
+tinyhash 1.4
+
+Tiny FNV-1a hashing library (libtinyhash) and the thash CLI.

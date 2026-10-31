@@ -1,0 +1,10 @@
+logs/*
+metrics/*
+config/*
+deploy-manifests/*
+RUNBOOK.md
+QUESTIONS.md
+services.yaml
+deploys.log
+pager.log
+incident-chat.txt

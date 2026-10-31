@@ -1,0 +1,7 @@
+[
+  {"id": "A100", "date": "2026-09-01", "customer": "Acme GmbH", "lines": [{"sku": "X1", "qty": 3, "unit_price": "19.99"}], "discount": "WELCOME5", "vat_rate": "0.19"},
+  {"id": "A101", "date": "2026-09-02", "customer": "Globex SA", "lines": [{"sku": "K9", "qty": 1, "unit_price": "249.00"}, {"sku": "C2", "qty": 4, "unit_price": "2.49"}], "vat_rate": "0.20"},
+  {"id": "J200", "date": "2026-09-03", "customer": "Kobayashi KK", "currency": "JPY", "lines": [{"sku": "X1", "qty": 2, "unit_price": "3200"}], "discount": "WELCOME5", "vat_rate": "0.10"},
+  {"id": "U300", "date": "2026-09-06", "customer": "Initech LLC", "currency": "USD", "lines": [{"sku": "K9", "qty": 1, "unit_price": "279.00"}], "discount": "TENPCT", "vat_rate": "0"},
+  {"id": "K400", "date": "2026-09-04", "customer": "Al-Noor Trading", "currency": "KWD", "lines": [{"sku": "C2", "qty": 7, "unit_price": "0.875"}], "vat_rate": "0"}
+]

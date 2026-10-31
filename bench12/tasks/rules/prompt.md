@@ -1,0 +1,1 @@
+Read RULES.md in this directory and carry out the release-notes job it specifies, using commits.jsonl as the input. Every numbered rule in RULES.md is binding — the file is long and rules appear throughout it, including near the end. Produce the deliverables it defines and finish only when you have checked every rule against your final files.

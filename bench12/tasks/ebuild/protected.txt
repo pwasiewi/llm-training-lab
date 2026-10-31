@@ -1,0 +1,7 @@
+distfiles/*
+Manifest
+pkgbuild
+tools/*
+make.conf
+POLICY.md
+RECIPES.md

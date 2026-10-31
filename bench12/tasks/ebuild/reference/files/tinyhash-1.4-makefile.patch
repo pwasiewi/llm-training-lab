@@ -1,0 +1,61 @@
+--- a/Makefile	2026-10-02 18:34:19.036505463 +0200
++++ b/Makefile	2026-10-02 18:34:19.036620992 +0200
+@@ -1,12 +1,14 @@
+ # tinyhash — upstream Makefile
+-PREFIX = /usr/local
+-CC = gcc
+-CFLAGS = -O3 -march=native -Wall -fPIC
+-LDFLAGS = -Wl,-rpath,$(CURDIR)
++PREFIX ?= /usr
++LIBDIR ?= $(PREFIX)/lib
++DESTDIR ?=
++CC ?= gcc
++CFLAGS ?= -O2
++CFLAGS += -Wall -fPIC
+ VERSION = 1.4
+ SONAME = libtinyhash.so.1
+ 
+-all: libtinyhash.so.$(VERSION) libtinyhash.a thash
++all: libtinyhash.so.$(VERSION) thash
+ 
+ src/%.o: src/%.c src/tinyhash.h
+ 	$(CC) $(CFLAGS) -c -o $@ $<
+@@ -15,7 +17,7 @@
+ 	$(CC) $(CFLAGS) -c -o $@ $<
+ 
+ libtinyhash.so.$(VERSION): src/tinyhash.o
+-	$(CC) -shared -Wl,-soname,$(SONAME) -o $@ $^
++	$(CC) $(LDFLAGS) -shared -Wl,-soname,$(SONAME) -o $@ $^
+ 	ln -sf $@ $(SONAME)
+ 	ln -sf $(SONAME) libtinyhash.so
+ 
+@@ -32,17 +34,19 @@
+ 	LD_LIBRARY_PATH=. ./tests/check
+ 
+ install: all
+-	install -d $(PREFIX)/bin $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/share/man/man1 $(PREFIX)/share/doc/tinyhash
+-	install -s -m755 thash $(PREFIX)/bin/thash
+-	install -m755 libtinyhash.so.$(VERSION) $(PREFIX)/lib/
+-	ln -sf $(PREFIX)/lib/libtinyhash.so.$(VERSION) $(PREFIX)/lib/$(SONAME)
+-	ln -sf $(PREFIX)/lib/$(SONAME) $(PREFIX)/lib/libtinyhash.so
+-	install -m644 libtinyhash.a $(PREFIX)/lib/
+-	install -m644 src/tinyhash.h $(PREFIX)/include/
+-	install -m644 doc/thash.1 $(PREFIX)/share/man/man1/
+-	install -m644 README NEWS $(PREFIX)/share/doc/tinyhash/
++	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(LIBDIR) $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/share/man/man1
++	install -m755 thash $(DESTDIR)$(PREFIX)/bin/thash
++	install -m755 libtinyhash.so.$(VERSION) $(DESTDIR)$(LIBDIR)/
++	ln -sf libtinyhash.so.$(VERSION) $(DESTDIR)$(LIBDIR)/$(SONAME)
++	ln -sf $(SONAME) $(DESTDIR)$(LIBDIR)/libtinyhash.so
++	install -m644 src/tinyhash.h $(DESTDIR)$(PREFIX)/include/
++	install -m644 doc/thash.1 $(DESTDIR)$(PREFIX)/share/man/man1/
++
++install-static: libtinyhash.a
++	install -d $(DESTDIR)$(LIBDIR)
++	install -m644 libtinyhash.a $(DESTDIR)$(LIBDIR)/
+ 
+ clean:
+ 	rm -f src/*.o tests/*.o tests/check thash libtinyhash.*
+ 
+-.PHONY: all check install clean
++.PHONY: all check install install-static clean

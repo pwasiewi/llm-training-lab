@@ -1,0 +1,32 @@
+"""Price an order: subtotal -> discount -> net -> VAT -> total."""
+from decimal import Decimal
+
+from invoicer.discounts import discount_amount
+from invoicer.models import Invoice
+from invoicer.money import round_money
+from invoicer.rates import Rates
+
+
+def subtotal(order):
+    return sum((l.unit_price * l.qty for l in order.lines), Decimal("0"))
+
+
+def price(order, number, discounts, rates=None):
+    cur = order.currency
+    rate = (rates or Rates()).rate(cur, order.date)
+    sub = round_money(subtotal(order), cur)
+    disc = discount_amount(order.discount, sub, discounts, cur, rate)
+    net = sub - disc
+    vat = round_money(net * order.vat_rate, cur)
+    return Invoice(number, order, sub, disc, net, vat, net + vat, rate)
+
+
+def number_invoices(orders):
+    """INV-<year>-<seq>, seq per year in (date, order id) order."""
+    out = []
+    seq = {}
+    for o in sorted(orders, key=lambda o: (o.date, o.id)):
+        year = o.date[:4]
+        seq[year] = seq.get(year, 0) + 1
+        out.append((f"INV-{year}-{seq[year]:04d}", o))
+    return out

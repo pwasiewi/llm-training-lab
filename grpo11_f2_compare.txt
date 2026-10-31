@@ -1,0 +1,9 @@
+paired items: 500
+A /home/pwas/Claude/llm/eval_math500_base.jsonl: 70.20%
+B eval_math500_f2.jsonl: 69.60%   delta -0.60 pp
+discordant: A-only-right 26, B-only-right 23, exact McNemar p = 0.7754
+  1: n=43 A 97.7% B 95.3%
+  2: n=90 A 82.2% B 82.2%
+  3: n=105 A 81.9% B 79.0%
+  4: n=128 A 69.5% B 71.1%
+  5: n=134 A 44.8% B 44.0%

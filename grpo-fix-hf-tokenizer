@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fix-hf-tokenizer — detect and repair broken tokenizer loading in the HF cache.
+"""grpo-fix-hf-tokenizer — detect and repair broken tokenizer loading in the HF cache.
 
 transformers 5.x rebuilds some tokenizer classes (e.g. LlamaTokenizerFast) in
 sentencepiece style, ignoring the ByteLevel decoder shipped in tokenizer.json.
@@ -33,12 +33,24 @@ FIXED_CLASS = "PreTrainedTokenizerFast"
 
 
 def die(msg):
-    print(f"fix-hf-tokenizer: {msg}", file=sys.stderr)
+    print(f"grpo-fix-hf-tokenizer: {msg}", file=sys.stderr)
     sys.exit(1)
 
 
 def model_id(snapshot_dir):
     return snapshot_dir.split("models--")[1].split("/snapshots")[0].replace("--", "/", 1)
+
+
+def byte_level(snapshot_dir):
+    """The probe (and the PreTrainedTokenizerFast fix) only apply to byte-level
+    (Ġ/Ċ) tokenizers; WordPiece/SentencePiece decode legitimately reflows
+    spaces around punctuation and can never round-trip the probe."""
+    path = os.path.join(snapshot_dir, "tokenizer.json")
+    try:
+        with open(path) as f:
+            return '"ByteLevel"' in f.read()
+    except OSError:
+        return True  # cannot tell — let the probe decide
 
 
 def probe_ok(snapshot_dir):
@@ -78,6 +90,9 @@ def run(apply):
     broken = fixed = skipped = 0
     for snap in snapshots():
         mid = model_id(snap)
+        if not byte_level(snap):
+            print(f"SKIP    {mid} — not byte-level, probe not applicable")
+            continue
         try:
             if probe_ok(snap):
                 print(f"OK      {mid}")
@@ -104,13 +119,13 @@ def run(apply):
     if apply and broken:
         print(f"\n{fixed} fixed, {skipped} not fixable, out of {broken} broken")
     if not apply and broken:
-        print(f"\n{broken} broken tokenizer(s) found — run: fix-hf-tokenizer fix")
+        print(f"\n{broken} broken tokenizer(s) found — run: grpo-fix-hf-tokenizer fix")
     return 0 if broken == skipped == 0 or (apply and fixed == broken) else 1
 
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="fix-hf-tokenizer",
+        prog="grpo-fix-hf-tokenizer",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

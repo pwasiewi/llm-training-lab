@@ -1,0 +1,79 @@
+#!/bin/bash
+# pkgbuild — a miniature ebuild runner for this sandbox (no root, no real Portage).
+#
+#   ./pkgbuild RECIPE        e.g. ./pkgbuild tinyhash-1.4.recipe
+#
+# Sequence: read make.conf -> verify distfiles/ against Manifest -> unpack into
+# work/ -> source RECIPE -> src_prepare, src_configure, src_compile, src_test,
+# src_install (into image/ = $D) -> QA scan. Logs: temp/build.log (phases and
+# make output), temp/cc.log (every $CC invocation). See RECIPES.md for the API.
+set -eo pipefail
+TOP="$(cd "$(dirname "$0")" && pwd)"
+die() { echo "pkgbuild: ERROR: $*" >&2; exit 1; }
+[[ $EUID -ne 0 ]] || die "refusing to run as root (sandbox tool)"
+[[ $# -eq 1 && -f "$1" ]] || die "usage: ./pkgbuild RECIPE"
+RECIPE="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+P="$(basename "$RECIPE" .recipe)"; PN="${P%-*}"; PV="${P##*-}"; PF="$P"
+# shellcheck disable=SC1091
+source "$TOP/make.conf"
+export CFLAGS LDFLAGS
+WORKDIR="$TOP/work"; D="$TOP/image"; T="$TOP/temp"; FILESDIR="$TOP/files"
+command rm -rf "$WORKDIR" "$D" "$T"; mkdir -p "$WORKDIR" "$D" "$T"
+export PKGBUILD_CCLOG="$T/cc.log"; : >"$PKGBUILD_CCLOG"
+export CC="$TOP/tools/cc-wrap"
+LOG="$T/build.log"
+log() { echo ">>> $*" | tee -a "$LOG"; }
+
+# --- helpers available to recipes (RECIPES.md) ---
+get_libdir() { echo "${LIBDIR_amd64:-lib}"; }
+use() { [[ " $USE " == *" $1 "* ]]; }
+emake() { make $MAKEOPTS "$@" 2>&1 | tee -a "$LOG"; return "${PIPESTATUS[0]}"; }
+eapply() { local p; for p in "$@"; do log "applying ${p##*/}"; patch -p1 -f -s <"$p" >>"$LOG" 2>&1 || die "patch failed: $p"; done; }
+dodoc() { install -d "$D/usr/share/doc/$PF"; install -m0644 "$@" "$D/usr/share/doc/$PF/"; }
+einstalldocs() { local f; for f in README* NEWS* ChangeLog* AUTHORS*; do [[ -f $f ]] && dodoc "$f"; done; return 0; }
+
+# --- defaults ---
+src_prepare() { [[ ${#PATCHES[@]} -gt 0 ]] && eapply "${PATCHES[@]}"; return 0; }
+src_configure() { :; }
+src_compile() { emake; }
+src_test() { emake check; }
+src_install() { emake DESTDIR="$D" install; einstalldocs; }
+
+PATCHES=()
+S="$WORKDIR/$P"
+# shellcheck disable=SC1090
+source "$RECIPE"
+
+# --- fetch check + unpack ---
+for f in $SRC_URI; do
+	want=$(awk -v f="$f" '$1=="DIST" && $2==f && $4=="SHA256" {print $5}' "$TOP/Manifest")
+	[[ -n "$want" ]] || die "$f not in Manifest"
+	got=$(sha256sum "$TOP/distfiles/$f" | cut -d' ' -f1)
+	[[ "$got" == "$want" ]] || die "Manifest mismatch for $f (distfiles are upstream, never edit them)"
+	tar -xzf "$TOP/distfiles/$f" -C "$WORKDIR"
+done
+[[ -d "$S" ]] || die "S=$S does not exist after unpacking"
+
+for phase in src_prepare src_configure src_compile src_test src_install; do
+	if [[ " ${RESTRICT:-} " == *" test "* && $phase == src_test ]]; then log "$phase skipped (RESTRICT=test)"; continue; fi
+	log "$phase"
+	set +e
+	(set -e; cd "$S"; "$phase")
+	rc=$?
+	set -e
+	[[ $rc -eq 0 ]] || die "$phase failed (see temp/build.log)"
+	log "$phase done"
+done
+
+# --- QA (the subset Portage would print) ---
+qa=0
+qa() { echo " * QA Notice: $*" | tee -a "$LOG"; qa=$((qa + 1)); }
+while IFS= read -r -d '' f; do
+	if readelf -h "$f" >/dev/null 2>&1; then
+		readelf -S "$f" 2>/dev/null | grep -q '\.symtab' || qa "pre-stripped file: ${f#"$D"}"
+		if readelf -d "$f" 2>/dev/null | grep -E 'R(UN)?PATH' | grep -q "$TOP"; then qa "insecure RUNPATH in ${f#"$D"}"; fi
+	fi
+done < <(find "$D" -type f -print0)
+if [[ -n "$(find "$D" -name '*.la')" ]]; then qa "libtool .la files installed"; fi
+echo ">>> image: $(find "$D" -type f | wc -l) files; $qa QA notice(s)" | tee -a "$LOG"
+echo ">>> $P built successfully" | tee -a "$LOG"

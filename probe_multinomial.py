@@ -14,12 +14,13 @@ logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
 
 import torch
 from unsloth import FastLanguageModel, PatchFastRL
+from lora_precision import base_precision
 PatchFastRL("GRPO", FastLanguageModel)
 
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="microsoft/Phi-4-mini-instruct",
     max_seq_length=2048,
-    load_in_4bit=True,
+    **base_precision("4bit", fast_inference=False),  # LORA_PRECISION=4bit|fp8|bf16
     attn_implementation="sdpa",
     device_map="auto",
     fast_inference=False,

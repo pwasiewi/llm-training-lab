@@ -1,0 +1,4 @@
+#!/bin/bash
+# Toolchain wrapper exported as $CC by ./pkgbuild: logs every invocation, then runs gcc.
+[[ -n "${PKGBUILD_CCLOG:-}" ]] && printf 'CC %s\n' "$*" >>"$PKGBUILD_CCLOG"
+exec gcc "$@"

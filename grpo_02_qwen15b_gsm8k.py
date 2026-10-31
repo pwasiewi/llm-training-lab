@@ -5,8 +5,8 @@ os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")  # drop vLLM INFO banner;
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
-os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/gcc")   # flashinfer runtime JIT: nvcc (CUDA 13.3) rejects host gcc-16, -ccbin comes from $CC
-os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/15/g++")
+os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
+os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
@@ -14,6 +14,7 @@ logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
 # ----------------------------------------------------------------------------------
 
 from unsloth import FastLanguageModel, is_bfloat16_supported, PatchFastRL
+from lora_precision import base_precision
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
 import re
@@ -42,7 +43,7 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     # at step 1 with B=0) and exp() of it poisons every LoRA-B grad (non-finite from
     # step 1, |B| stays 0 — the run silently never trains). In bf16 both sides share
     # one numerical identity: grads finite, KL ~1e-4. 1.5B bf16 fits 16 GB (~3 GB x2).
-    load_in_4bit=False,
+    **base_precision("bf16", fast_inference=True),  # LORA_PRECISION=4bit|fp8|bf16
     fast_inference=True,
     max_lora_rank=lora_rank,
     gpu_memory_utilization=0.5,  # 0.8 left too little VRAM for the colocated training step (OOM at step 12 on 16 GB)
