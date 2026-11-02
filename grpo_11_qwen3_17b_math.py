@@ -98,6 +98,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
 os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
+os.environ.setdefault("UNSLOTH_VLLM_MERGED_ROLLOUT", "0")  # keep rollouts on vLLM LoRA: zoo main defaults to folding LoRA into the bf16 base weights, which rounds away a low-lr delta (update review 2026-11-02)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
@@ -116,8 +117,6 @@ from math_verify import parse, verify, LatexExtractionConfig
 import grpo_runlib as RL
 from grpo_11_task import SYSTEM_PROMPT, USER_TEMPLATE, last_boxed, is_correct, build_prompt, TASK_SHA
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
-os.environ["VLLM_USE_V1"] = "0"
 os.environ["FLASH_ATTENTION_USE_FA2"] = "1"
 os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 
@@ -173,6 +172,10 @@ RL.check_env({"GRPO_TAG", "GRPO_G", "GRPO_LOSS", "GRPO_BETA", "GRPO_SCALE", "GRP
 SEED_INIT    = _env("GRPO_SEED_INIT", RL.derive_seed(SEED, "lora_init") if SEED != "" else 3407, int)
 SEED_DATA    = _env("GRPO_SEED_DATA", RL.derive_seed(SEED, "data_order") if SEED != "" else 3407, int)
 SEED_TRAINER = _env("GRPO_SEED_TRAINER", RL.derive_seed(SEED, "trainer") if SEED != "" else None, int)
+# cispo uses epsilon_high as the CAP on the detached IS weight (zoo grpo_compute_loss, TRL #7917 default 5.0), not
+# as the DAPO clip-higher margin: the 0.28 default above would scale every on-policy token's gradient by 0.28.
+if LOSS == "cispo" and (EPS_HIGH or 0) < 1:
+    raise SystemExit(f"[grpo_11] GRPO_LOSS=cispo needs GRPO_EPS_HIGH >= 1 (the IS-weight cap; TRL default 5.0), got {EPS_HIGH}")
 _smoke_patches = {}
 if SMOKE:
     # Kauldron-style smoke preset: every changed knob is recorded in run.json.

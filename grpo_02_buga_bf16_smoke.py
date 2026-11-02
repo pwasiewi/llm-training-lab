@@ -29,6 +29,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
 os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
+os.environ.setdefault("UNSLOTH_VLLM_MERGED_ROLLOUT", "0")  # keep rollouts on vLLM LoRA: zoo main defaults to folding LoRA into the bf16 base weights, which rounds away a low-lr delta (update review 2026-11-02)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.getLogger("unsloth_zoo").setLevel(logging.CRITICAL)
@@ -41,8 +42,6 @@ from trl import GRPOConfig, GRPOTrainer
 import re
 from datasets import load_dataset, Dataset
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
-os.environ["VLLM_USE_V1"] = "0"
 os.environ["FLASH_ATTENTION_USE_FA2"] = "1"
 os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"
 

@@ -11,7 +11,6 @@ from datasets import load_dataset
 import re
 import os
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
 seed = 43
 
 # Load tokenizer & model (vLLM)

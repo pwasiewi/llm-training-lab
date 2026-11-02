@@ -72,6 +72,24 @@ def _cmd(*argv) -> str | None:
         return None
 
 
+_LIVE_EBUILDS = ("sci-ml/caffe2", "dev-python/vllm", "sci-ml/unsloth", "sci-ml/unsloth-zoo", "sci-ml/trl", "sci-ml/peft",
+                 "sci-ml/torchvision", "sci-ml/torchaudio")
+
+
+def _live_commits() -> dict:
+    """Git commit of each installed Gentoo live (-9999) ebuild: their Python metadata only says 9999."""
+    import bz2, re
+    out = {}
+    for cp in _LIVE_EBUILDS:
+        try:
+            with bz2.open(f"/var/db/pkg/{cp}-9999/environment.bz2", "rt", errors="replace") as fh:
+                m = re.search(r'EGIT_VERSION="([0-9a-f]+)"', fh.read())
+            out[cp] = m.group(1) if m else None
+        except OSError:
+            continue
+    return out
+
+
 def environment_snapshot(repo_dir: str) -> dict:
     versions = {}
     for p in _PKGS:
@@ -93,6 +111,7 @@ def environment_snapshot(repo_dir: str) -> dict:
         "packages": versions,
         "torch_version": torch_version,
         "torch_cuda": cuda,
+        "live_commits": _live_commits(),
         "gpu": gpu,
         "git_head": _cmd("git", "-C", repo_dir, "rev-parse", "HEAD"),
         "git_dirty": bool(_cmd("git", "-C", repo_dir, "status", "--porcelain", "--untracked-files=no")),
@@ -225,6 +244,19 @@ def bf16_update_stats(model, max_modules: int = 8) -> dict | None:
 
 # ---------------------------------------------------------------- H4: smoke assertions
 
+def merged_rollout_mode() -> str | None:
+    """unsloth-zoo's merged-weight rollout mode, or None when rollouts use vLLM's own LoRA (what we want).
+
+    zoo main (after 2026-10-19) folds s*B@A into the bf16 base weights by default; at lr ~4e-6 the delta is
+    below half a bf16 ULP for most weights, so rollouts silently come from the base model. Scripts set
+    UNSLOTH_VLLM_MERGED_ROLLOUT=0 before the unsloth import; this reads back what zoo actually decided."""
+    vu = sys.modules.get("unsloth_zoo.vllm_utils")
+    fn = getattr(vu, "_merged_rollout_mode", None) if vu else None
+    if fn is None:
+        return None if vu else "unknown (unsloth_zoo.vllm_utils not loaded)"
+    return fn()
+
+
 class SmokeCheck:
     """Collects the facts a GRPO_SMOKE=1 run must establish; verdict() exits non-zero on any failure."""
 
@@ -249,12 +281,15 @@ class SmokeCheck:
             out.append("|B|max is 0 after training: the adapter never moved")
         if self.lora_calls is not None and self.lora_calls == 0:
             out.append("the rollout engine never received the live adapter (0 wrapped generate calls)")
+        if (mode := merged_rollout_mode()) is not None:
+            out.append(f"merged-weight rollouts are on ({mode}): set UNSLOTH_VLLM_MERGED_ROLLOUT=0")
         return out
 
     def verdict(self, run_dir: str | None = None) -> None:
         fails = self.failures()
         facts = {"tripwire_calls": self.tripwire_calls, "nonfinite_max": self.nonfinite_max,
-                 "b_max_last": self.b_max_last, "lora_calls": self.lora_calls}
+                 "b_max_last": self.b_max_last, "lora_calls": self.lora_calls,
+                 "merged_rollout": merged_rollout_mode()}
         if run_dir:
             update_manifest(run_dir, smoke={"passed": not fails, "failures": fails, **facts})
         if fails:

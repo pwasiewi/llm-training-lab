@@ -8,7 +8,6 @@ import torch
 import re
 import os
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
 seed = 43
 
 model_path = "outputs/lora-grpo-deepseek-r1-llama8b"

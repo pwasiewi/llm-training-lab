@@ -226,9 +226,11 @@ def main():
     # lingers holding the whole KV cache (13 GiB), which OOMs the next training run
     # (grpo11_e0_run.log, 2026-09-08). Shut the engine down, then exit hard.
     try:
-        llm.llm_engine.shutdown()
-    except Exception:
-        pass
+        # vLLM b8c04dd3 (2026-11) moved shutdown() from LLMEngine to its engine-core client
+        _eng = llm.llm_engine
+        (getattr(_eng, "shutdown", None) or _eng.engine_core.shutdown)()
+    except Exception as e:
+        print(f"WARNING: vLLM engine shutdown failed ({type(e).__name__}: {e}); the EngineCore may outlive this process", flush=True)
     del llm
     import gc
     gc.collect()

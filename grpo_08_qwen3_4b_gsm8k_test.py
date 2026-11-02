@@ -8,7 +8,6 @@ import torch
 import re
 import os
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
 seed = 43
 
 model_path = "outputs/lora-grpo-qwen3-4b-2507-r16"  # must match grpo_08_qwen3_4b_gsm8k.py (merged via grpo_merge.py)

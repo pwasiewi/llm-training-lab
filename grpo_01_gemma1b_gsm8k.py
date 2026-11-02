@@ -7,6 +7,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # cut VRAM fragmentation on the 16 GB card
 os.environ.setdefault("CC", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/gcc")   # flashinfer JIT takes -ccbin from $CC (CUDA 13.4.3, gcc 16)
 os.environ.setdefault("CXX", "/usr/x86_64-pc-linux-gnu/gcc-bin/16/g++")
+os.environ.setdefault("UNSLOTH_VLLM_MERGED_ROLLOUT", "0")  # keep rollouts on vLLM LoRA: zoo main defaults to folding LoRA into the bf16 base weights, which rounds away a low-lr delta (update review 2026-11-02)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # The "[ERROR] ... not documented" lines are unsloth-zoo docstring checks, not real errors:
@@ -24,8 +25,6 @@ import os
 from datasets import load_dataset, Dataset
 from tqdm import tqdm
 
-os.environ["VLLM_FLASH_ATTN_VERSION"] = "2"
-os.environ["VLLM_USE_V1"] = "0"
 os.environ["FLASH_ATTENTION_USE_FA2"] = "1"  # Force FA2
 os.environ["XFORMERS_MEM_EFF_ATTN"] = "0"    # Disable xFormers (conflicts with FA2)
 
@@ -43,7 +42,7 @@ checkpoint_path = f"{model_path}-outputs/checkpoint-550"  # Path to your last ch
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
-    **base_precision("fp8", fast_inference=False),  # was bf16; fp8 = half the weight VRAM, uncapped FP8 tensor cores (lora_precision.py)
+    **base_precision("bf16", fast_inference=False),  # back to bf16 2026-11-02: since unsloth 2026.10.11 "fp8" loads REAL torchao Float8 (before: silently bf16, #14093) and TRL's colocated vLLM weight sync cannot copy it ("cross-device .data requires matching dtype"); LORA_PRECISION=fp8 only with use_vllm=False
     load_in_8bit=False,  # [NEW!] A bit more accurate, uses 2x memory
     full_finetuning=False,  # [NEW!] We have full finetuning now!
     # load_in_4bit=True,
