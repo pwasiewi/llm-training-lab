@@ -3268,3 +3268,73 @@ token budget) passed at 16, 8, 7; 6 and 4 died at boot. Profile at 9 (floor+2).
 
 Verdict: Sage stays an alternate; the default does not change. Regex 0/4 across every Sage run is a hard gap.
 Vision (mmproj 0.84 GiB, downloaded) is untested.
+
+## 2026-11-03 — small 27B builds: enru, Saluki, Caphlon vs swift-27b-mtp2-kv4 (night/small27-queue-1103.sh, 0 server deaths)
+
+Three Qwen3.8-27B builds that fit whole with room to spare, same profile shape as `q38ud-27b`
+(`-c 53248`, q8_0 KV, reasoning medium, Qwen sampling); control `swift-27b-mtp2-kv4` in the same
+session. Installed llama.cpp b12001. Polish = 3 fixed prompts, thinking off, read by hand
+(`night/small27-*-polish.txt`). Architecture comparison and the tokenizer test:
+`~/Claude/info/research-gguf-arch-quality-20261103.md`.
+
+| | enru-27b | swift-27b-mtp2-kv4 | saluki-27b | caphlon-27b |
+|---|---|---|---|---|
+| file | IQ3_XXS 10.99 GB | GSQ-RCO IQ3_S 12.12 GB | IQ2 mix 7.90 GB | IQ2_S 7.38 GB |
+| VRAM @49K | 14.0 GiB | ~15 GiB (q4_0 KV) | 11.7 GiB | 11.3 GiB |
+| tg @1K / @49K | 63 / 54 | MTP, not re-measured | 70 / 62 | 79 / 67 |
+| needle 1K/16K/49K | 6/6 | – | 6/6 | 6/6 |
+| bench_14 tools | 6/6 | 6/6 | 6/6 | 5/6 (decline) |
+| parser pass 1 | 4/4 (regex 249 s) | **4/4** (regex 130 s) | 2/4 | 3/4 |
+| parser pass 2 | 4/4 (regex 474 s) | not run | 3/4 | 1/4 |
+| bench_07 RUNS=10 | 10/10, 179 s | (10-18: 10/10, 116 s) | 10/10, 184 s | 10/10, 192 s |
+| Polish | very good | very good | good | unusable |
+
+Verdict: enru-27b = CANDIDATE (8/8 incl. regex 2/2, tools 6/6, q8_0 KV fits with 2 GiB spare);
+saluki-27b = alternate, not promoted (regex 0/2); caphlon-27b = REJECTED. The control scoring 4/4
+rules out session drift as the cause of the 2-bit losses. bench_07 is 10/10 for all four: it no
+longer separates this tier. A prediction written before the result (enru ~6/8 because its
+attention sits at 3.02 bpw) was wrong: the "keep attention high" rule holds for MoE files, not
+for this dense hybrid with an imatrix IQ3_XXS.
+
+## 2026-11-03/04 — GGUF hunt queue: 7 candidates + same-session control (night/q-hunt-1103.sh, 13 h 45 min, rc=0)
+
+Candidates from the 16 GB hunt (`~/Claude/info/ggufhunt-16g-20261103.md`,
+`info/scratch-27b-arch-hunt-20261103.md`). Per model: top-down ncmoe floor probe (each step
+must answer the 49K needle; production = last pass + 2), tg at 49K, bench_14 tools,
+3 Polish prompts (thinking off, read by hand, `night/hunt-*-polish.txt`), bench_05 parser
+tier ×2 (`TASK_TIMEOUT=1200`), bench_07 RUNS=10. Control `ornith15-128k-mc` at the end:
+tools + Polish + parser ×1. Installed llama.cpp b12001. Summary: `night/q-hunt-1103.summary.tsv`.
+
+| | enru-27b-mtp | kataguru-35b | bolt-q3kxl | groot-19b | q38-14b | ornith122-iq2 | memt-35b | **ctrl ornith15-128k-mc** |
+|---|---|---|---|---|---|---|---|---|
+| file | IQ3_XXS 10.99 GB + MTP draft | APEX-Good | UD-Q3_K_XL | Q4_0 (13.8 GB, whole) | Q5_K_M | UD-IQ2_XXS | Q4_K_M 21.6 GB | Q4_K_M 20.2 GiB |
+| ncmoe (floor) | whole | **14** (12; 10 boots, needle FAIL) | **80** (78; 74 boot fail) | **0** | whole | **40** (38; 36 boot fail) | — | 28 + mc |
+| VRAM after 49K | 14.9 GiB | 14.6 | 13.8 | 13.8 | 13.5 | 13.9 | — | — |
+| tg @49K | **88.8** | 70.3 | 24.0 | **168.9** | 66.5 | 20.1 | — | (103, 10-30) |
+| tools | 6/6 | 6/6 | 6/6 | 6/6 | **0/6** | 6/6 | — | 6/6 |
+| parser pass 1 | 3/4 (regex TIMEOUT 10/14) | 3/4 | 3/4 | **4/4** | 0/4 | **4/4** (regex 690 s) | — | **4/4** (133/149/165/640 s) |
+| parser pass 2 | 0/4 = **infra** (server never healthy, 300 s, disk contention from downloads) | 2/4 (regex never) | 4/4 | **4/4** | 0/4 | **4/4** (regex 705 s) | — | not run |
+| bench_07 RUNS=10 | 10/10, med 121 s | 9/10, 61 s | 9/10, 395 s | **10/10, 48 s** | 0/10 (7 FAIL, 3 TIMEOUT) | **10/10**, 399 s | — | not run |
+| Polish | very good | correct, terse | good, minor slips ("volatile", typo) | **unusable** (mixed languages) | gibberish | very good | — | very good |
+
+Verdicts:
+- **groot-19b = CANDIDATE (fast tier)** — 8/8 parser incl. regex 2/2, bench_07 10/10 at the
+  fastest median in this log (48 s), fits whole at 169 tok/s. Polish unusable (expert pruning
+  256→128, probably dropped multilingual experts — inference). Promotion needs RUNS=20 +
+  parser ×3 against `ornith15-128k-mc` and `ornith15-gsq3` in one session, with the card's
+  coding sampling (temp 0.6, top_p 0.95, top_k 20, presence 0.0) added to the profile.
+- **ornith122-iq2 = ALTERNATE, "slow but smart"** — 8/8 parser, 10/10 bench_07, very good
+  Polish, but 20 tok/s and 399 s median runs (≈ 8× groot). First measurement of a >100B model on
+  this card; the 10-29 ">100B rule" rejection was wrong on quality, right on speed.
+- **enru-27b-mtp = unresolved** — MTP lifts tg 54 → 89 and halves the bench_07 median
+  (179 → 121 s) but pass 1 lost regex (the card warns the draft head was not retrained after the
+  vocab cut); pass 2 was lost to infra. Rerun parser ×2 before a verdict.
+- **kataguru-35b = REJECTED** — 5/8 parser (regex 0/2), Polish terse; nothing over the leader.
+- **bolt-q3kxl = REJECTED** — 7/8 but 24 tok/s and 395 s median; the existing `bolt` alternate
+  lost to the leader already (10-30), a slower quant of it earns nothing.
+- **q38-14b = REJECTED** — empty content on every request, 0/6 tools; broken GGUF/template. Delete candidate.
+- **memt-35b = NOT RUNNABLE on b12001** — `wrong number of tensors; expected 853, got 733`:
+  `general.architecture` says `qwen35moe` but the file carries 120 extra `blk.N.memt_*` tensors
+  (12 kinds × 10 layers: q/k/v/w/b/f/g, decay, o_norm — a memory module) that mainline does not
+  know. Needs the author's llama.cpp fork; the queue's "floor FAIL" is not a VRAM result.
+- Control 4/4 in the same session rules out drift for the losses above.
