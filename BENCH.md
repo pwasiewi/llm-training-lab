@@ -121,10 +121,10 @@ Roles in service today (2026-10-30):
 | Role | Profile |
 |---|---|
 | serious agentic (default) | `ornith15-128k-mc` — reconfirmed by the user 2026-10-19 over `gsq35-mc` |
-| fast coding tier (default) | `gpt-oss20b-udq8kxl-high` — **`groot-19b-iq4xs` recommended 2026-11-05** (English/code), see "Finalists in one session" |
+| fast coding tier (default), English/code | `groot-19b-iq4xs` — **switched 2026-11-05 on the user's word** ("switch roles") after the finals + Aider; `gpt-oss20b-udq8kxl-high` stays the fast tier for Polish or untimed work, see "Finalists in one session" |
 | workflow agent (default) | `ornith15-9b` |
 | serious agentic (alternate) | `tiel-128k-mc` |
-| fast tier, speed pick | `ornith15-gsq3` — demoted to the HDD 2026-11-04 (parser 8/12 in the promotion run); retire once Groot is confirmed |
+| fast tier, speed pick | retired 2026-11-05 (`ornith15-gsq3` on the HDD, profile kept); Groot covers it |
 | alternate, not promoted | `bolt` — lost the same-session N=20 run to `ornith15-128k-mc` (2026-10-30) |
 
 ## Finalists in one session — 2026-11-05 (`night/q-final-1105.sh`, 01:38 → 17:22, rc=0, 0 Xid)
