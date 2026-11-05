@@ -131,9 +131,9 @@ Roles in service today (2026-10-30):
 
 Six profiles, every phase in the same session with the same llama.cpp b12001, so the columns are
 comparable with each other and NOT with older dated runs. Groot arm = IQ4_XS (winner of the quant arms,
-`night/q-groot-quant-1106` + `q-groot-q4km-1106`). The Aider column is pending: phase A ran on a dead
-venv (Python 3.13 removed 11-02) and is being rerun as `q-aider-1105`. Evidence: `BENCH-archive.md`
-"2026-11-05 — finalists".
+`night/q-groot-quant-1106` + `q-groot-q4km-1106`). The Aider column comes from `q-aider-1105` (17:23 → 22:55,
+rc=0, 0 Xid): phase A of the finals ran on a dead venv (Python 3.13 removed 11-02) and was rerun on the
+rebuilt one, same five models, same llama.cpp. Evidence: `BENCH-archive.md` "2026-11-05 — finalists".
 
 **Table 1 — speed and fit** (128K ctx, q8_0 KV; 27Bs at 53K ctx; bench_11 ×2, needle on; VRAM = after the deepest prompt)
 
@@ -145,7 +145,7 @@ venv (Python 3.13 removed 11-02) and is being rerun as `q-aider-1105`. Evidence:
 | VRAM after deepest | 14 673 MiB | **13 611** | 14 483 | 14 976 | 15 036 | 14 038 |
 | needle | 8/8 | 8/8 | 6/6 (to 49K) | 6/6 (to 49K) | 6/8 — **98K: empty answer, 256 tokens of reasoning** (format artifact, see Table 3) | 8/8 |
 
-**Table 2 — code** (bench_12_hard RUNS=2, nine tasks, bwrap; `o122` RUNS=1; Aider hard 20 pending)
+**Table 2 — code** (bench_12_hard RUNS=2, nine tasks, bwrap; `o122` RUNS=1; Aider hard 20 = `q-aider-1105`, one run, two tries per task)
 
 | | leader | groot-iq4xs | enru-mtp | swift | gpt-oss-high | o122 |
 |---|---|---|---|---|---|---|
@@ -154,7 +154,15 @@ venv (Python 3.13 removed 11-02) and is being rerun as `q-aider-1105`. Evidence:
 | 0/2 | ebuild | chain6, rules, reconcile, ebuild | chain6, chain10, rules, tracespec | chain6, chain10, chain14, rules, tracespec, ebuild | ledger, chain10, rules, longctx, reconcile, ebuild | ledger, chain10, tracespec, reconcile, ebuild, rules (all TIMEOUT) |
 | mean PASS run | 522 s | **202 s** | 254 s | 203 s | 410 s | 1 518 s |
 | groot quant arms (RUNS=2, 11-04/05) | — | IQ4_XS 13, Q4_K_M 13, Q4_K_S 11, Q4_0 10 | | | | |
-| Aider hard 20 (`q-aider-1105`) | pending | pending | pending | pending | pending | skipped (speed) |
+| Aider hard 20 (`q-aider-1105`) | **15/20** (75 %, CI 53–89) | 9/20 (45 %) | 7/20 (35 %) | 10/20 (50 %) | **13/20** (65 %) | skipped (speed) |
+| Aider pass on try 1 / wall for 20 | 7 / 48 min | 4 / 43 min | 1 / 33 min | 2 / 29 min | 3 / **176 min** | — |
+| Aider paired vs leader (exact McNemar) | — | 0–6, **p 0.031** | 0–8, **p 0.008** | 1–6, p 0.125 | 1–3, p 0.625 | — |
+
+Aider reading: the leader is the only model significantly ahead of Groot and enru; **gpt-oss-high is the
+runner-up on pass rate** (13 vs 15, not separable at N=20) and beats Groot 5–1 on the tasks they split
+(p 0.22), but its reasoning costs 4× the wall time (176 vs 43 min for the 20 tasks). Five tasks fell for
+everyone (`go/poker`, `java/connect`, `java/word-search`, `cpp/spiral-matrix`, plus `rust/macros` for the
+three non-27Bs); the JavaScript set and `rust/grade-school` passed for everyone.
 
 bench_12 at RUNS=2 moves ±3 between sessions for the same model (groot 13 → 8 overnight on the same
 file), so only the leader-vs-rest gap (12 vs ≤8) is a finding; the order of the 4–8 group is not.
@@ -189,8 +197,8 @@ budget), not a context failure.
 | Role | Today | Recommended | Why |
 |---|---|---|---|
 | serious agentic (default) | `ornith15-128k-mc` | **keep** | bench_12 12/18 vs 8/18 for the runner-up, same session; Polish 12/16 |
-| fast coding tier (default), English/code | `gpt-oss20b-udq8kxl-high` | **`groot-19b-iq4xs`** | 1.3–1.5× gpt-oss tg at depth, bench_12 8 vs 4, bench_07 19/20 vs 17/20 and 15/20, parser 20/20, horizon ≥ gpt-oss to 32K; 13.6 GiB whole |
-| fast tier with Polish | — | `gpt-oss20b-udq8kxl-high` | Polish 14/16, 98K chain 0.997; keep as the fallback when Polish output matters |
+| fast coding tier (default), English/code, time-boxed | `gpt-oss20b-udq8kxl-high` | **`groot-19b-iq4xs`** | 1.3–1.5× gpt-oss tg at depth, bench_12 8 vs 4, bench_07 19/20 vs 17/20 and 15/20, parser 20/20, horizon ≥ gpt-oss to 32K; 13.6 GiB whole. Aider 9/20 in 43 min vs gpt-oss 13/20 in 176 min: Groot is the pick when the clock matters |
+| fast tier, Polish or no time limit | — | `gpt-oss20b-udq8kxl-high` | Polish 14/16, 98K chain 0.997, Aider 13/20 (runner-up to the leader, 5–1 over Groot on split tasks); the fallback when Polish output or Aider-style pass rate matters more than speed |
 | fast tier, speed pick | `ornith15-gsq3` — demoted to the HDD 2026-11-04 (parser 8/12 in the promotion run); retire once Groot is confirmed | **retire** (demoted to HDD 11-04) | parser 8/12, regex 0/3 in the promotion run; groot is faster and cleaner |
 | slow-but-smart alternate | `ornith122-iq2` | keep as is | Polish 15/16, horizon 0.99, but 20 tok/s: bench_12 6 TIMEOUTs; not for time-boxed work |
 | 27B alternates | `enru-27b-mtp`, `swift-27b-mtp2-kv4` | **neither promoted** | bench_12 5/18 each, Polish 9 and 11, horizon excellent to 32K; 53K ctx only. `enru-27b` plain stays the 27B candidate on parser evidence |

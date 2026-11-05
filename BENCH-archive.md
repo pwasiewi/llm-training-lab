@@ -3406,10 +3406,62 @@ matches its bench_12 profile (wins by persistence, not by per-step accuracy).
 | OS update, 4 steps | 2 | 0 (English) | 2 | 2 | 2 | 2 |
 | **total /16** | **12** | **0** | **9** | **11** | **14** | **15** |
 
-### Phase A (Aider hard 20) — no data
+### Phase A (Aider hard 20) — rerun as `night/q-aider-1105.sh` (17:23 → 22:55, rc=0, 0 Xid)
 
-All five models reported 0/20 in ten seconds, rc=127: `/mnt/cc/strata/bench-public/venv/bin/python`
-pointed at Python 3.13, removed by the 2026-11-02 ML stack bump. Venv rebuilt on 3.14 (same pins)
-2026-11-05 14:48; rerun `night/q-aider-1105.sh` chained after this queue, same TAG `final-1105-aider`.
-Lesson: a phase that ends in seconds with a round 0/N for every model is `blocked`, not a result
-(memory `reference_venv_python_bump`).
+The finals' own phase A produced no data: all five models reported 0/20 in ten seconds, rc=127, because
+`/mnt/cc/strata/bench-public/venv/bin/python` pointed at Python 3.13, removed by the 2026-11-02 ML stack
+bump. Venv rebuilt on 3.14 (same pins) 14:48; the rerun used the same TAG `final-1105-aider`, the same
+five profiles and llama.cpp b12001, so the column belongs to the same session. Lesson: a phase that ends
+in seconds with a round 0/N for every model is `blocked`, not a result (memory `reference_venv_python_bump`).
+
+| model | PASS | FAIL | rate | 95 % CI | pass on try 1 | wall (20 tasks) |
+|---|---|---|---|---|---|---|
+| ornith15-128k-mc | **15** | 5 | 75 % | 53–89 | 7 | 47.6 min |
+| gpt-oss20b-udq8kxl-high | **13** | 7 | 65 % | 43–82 | 3 | 175.6 min |
+| swift-27b-mtp2-kv4 | 10 | 10 | 50 % | 30–70 | 2 | 29.4 min |
+| groot-19b-iq4xs | 9 | 11 | 45 % | 26–66 | 4 | 42.5 min |
+| enru-27b-mtp | 7 | 13 | 35 % | 18–57 | 1 | 33.0 min |
+
+No TIMEOUT, no lost row. Per task (`bench13/select_core.py --paired`; P1/P2 = pass on try 1/2, `*` = the
+models disagree):
+
+```
+SUITE TASK                                                ornith15-128k-mc         groot-19b-iq4xs            enru-27b-mtp      swift-27b-mtp2-kv4 gpt-oss20b-udq8kxl-high  
+aider cpp/dnd-character                                                 P2                       F                       F                      P2                       F *
+aider cpp/spiral-matrix                                                  F                       F                       F                       F                       F  
+aider cpp/zebra-puzzle                                                  P2                      P1                       F                       F                      P1 *
+aider go/matrix                                                         P2                       F                       F                       F                      P2 *
+aider go/poker                                                           F                       F                       F                       F                       F  
+aider go/react                                                          P2                      P2                       F                      P1                      P2 *
+aider go/dominoes                                                       P1                      P2                      P1                      P2                      P1  
+aider java/go-counting                                                  P2                       F                       F                       F                       F *
+aider java/word-search                                                   F                       F                       F                       F                       F  
+aider java/connect                                                       F                       F                       F                       F                       F  
+aider javascript/wordy                                                  P2                       F                      P2                       F                      P2 *
+aider javascript/complex-numbers                                        P2                      P2                      P2                      P2                      P2  
+aider javascript/scale-generator                                        P1                      P2                      P2                      P2                      P2  
+aider javascript/parallel-letter-frequency                              P1                      P2                      P2                      P2                      P2  
+aider python/connect                                                    P2                       F                       F                       F                      P2 *
+aider python/transpose                                                  P1                      P1                       F                      P2                      P1 *
+aider python/react                                                      P1                       F                       F                       F                      P2 *
+aider rust/luhn-from                                                    P1                      P1                      P2                      P1                       F *
+aider rust/macros                                                        F                       F                       F                      P2                      P2 *
+aider rust/grade-school                                                 P1                      P1                      P2                      P2                      P2  
+cells: P/F (1 run), P1/P2 = aider pass on try 1/2, k/n (several runs), L = lost, '.' = not run
+Pairwise (tasks where one model's pass rate is higher; one pair per TASK; exact McNemar):
+  ornith15-128k-mc vs groot-19b-iq4xs: ornith15-128k-mc-only 6, groot-19b-iq4xs-only 0, p = 0.031
+  ornith15-128k-mc vs enru-27b-mtp: ornith15-128k-mc-only 8, enru-27b-mtp-only 0, p = 0.008
+  ornith15-128k-mc vs swift-27b-mtp2-kv4: ornith15-128k-mc-only 6, swift-27b-mtp2-kv4-only 1, p = 0.125
+  ornith15-128k-mc vs gpt-oss20b-udq8kxl-high: ornith15-128k-mc-only 3, gpt-oss20b-udq8kxl-high-only 1, p = 0.625
+  groot-19b-iq4xs vs enru-27b-mtp: groot-19b-iq4xs-only 3, enru-27b-mtp-only 1, p = 0.625
+  groot-19b-iq4xs vs swift-27b-mtp2-kv4: groot-19b-iq4xs-only 1, swift-27b-mtp2-kv4-only 2, p = 1.000
+  groot-19b-iq4xs vs gpt-oss20b-udq8kxl-high: groot-19b-iq4xs-only 1, gpt-oss20b-udq8kxl-high-only 5, p = 0.219
+  enru-27b-mtp vs swift-27b-mtp2-kv4: enru-27b-mtp-only 1, swift-27b-mtp2-kv4-only 4, p = 0.375
+  enru-27b-mtp vs gpt-oss20b-udq8kxl-high: enru-27b-mtp-only 1, gpt-oss20b-udq8kxl-high-only 7, p = 0.070
+  swift-27b-mtp2-kv4 vs gpt-oss20b-udq8kxl-high: swift-27b-mtp2-kv4-only 2, gpt-oss20b-udq8kxl-high-only 5, p = 0.453
+```
+
+Reading: only the leader separates from the pack at N=20 (vs groot p 0.031, vs enru p 0.008). gpt-oss-high
+is the runner-up on pass rate and takes 5 of the 6 tasks it splits with Groot, at four times the wall
+time (reasoning tokens: `python/connect` alone cost 35.9K completion tokens). Groot's wall time is the
+leader's with half the passes. Five tasks beat every model.
