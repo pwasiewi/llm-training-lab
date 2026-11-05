@@ -121,11 +121,79 @@ Roles in service today (2026-10-30):
 | Role | Profile |
 |---|---|
 | serious agentic (default) | `ornith15-128k-mc` — reconfirmed by the user 2026-10-19 over `gsq35-mc` |
-| fast coding tier (default) | `gpt-oss20b-udq8kxl-high` |
+| fast coding tier (default) | `gpt-oss20b-udq8kxl-high` — **`groot-19b-iq4xs` recommended 2026-11-05** (English/code), see "Finalists in one session" |
 | workflow agent (default) | `ornith15-9b` |
 | serious agentic (alternate) | `tiel-128k-mc` |
-| fast tier, speed pick | `ornith15-gsq3` |
+| fast tier, speed pick | `ornith15-gsq3` — demoted to the HDD 2026-11-04 (parser 8/12 in the promotion run); retire once Groot is confirmed |
 | alternate, not promoted | `bolt` — lost the same-session N=20 run to `ornith15-128k-mc` (2026-10-30) |
+
+## Finalists in one session — 2026-11-05 (`night/q-final-1105.sh`, 01:38 → 17:22, rc=0, 0 Xid)
+
+Six profiles, every phase in the same session with the same llama.cpp b12001, so the columns are
+comparable with each other and NOT with older dated runs. Groot arm = IQ4_XS (winner of the quant arms,
+`night/q-groot-quant-1106` + `q-groot-q4km-1106`). The Aider column is pending: phase A ran on a dead
+venv (Python 3.13 removed 11-02) and is being rerun as `q-aider-1105`. Evidence: `BENCH-archive.md`
+"2026-11-05 — finalists".
+
+**Table 1 — speed and fit** (128K ctx, q8_0 KV; 27Bs at 53K ctx; bench_11 ×2, needle on; VRAM = after the deepest prompt)
+
+| | `ornith15-128k-mc` (leader) | `groot-19b-iq4xs` | `enru-27b-mtp` | `swift-27b-mtp2-kv4` | `gpt-oss20b-udq8kxl-high` | `ornith122-iq2` |
+|---|---|---|---|---|---|---|
+| file | Q4_K_M 20.2 GiB, ncmoe 28 + mc | IQ4_XS 10.9 GB, whole | IQ3_XXS 11.0 GB + MTP, whole | IQ3_S 12.1 GB + MTP, whole | Q8_K_XL 12.3 GiB, whole | UD-IQ2_XXS, ncmoe 40 |
+| tg @1K / 16K / 49K / 98K | 93 / 106 / 101 / 88 | **187 / 175 / 157 / 136** | 107 / 100 / 92 / — | 102 / 92 / 86 / — | 185 / 159 / 122 / 88 | 21 / 22 / 22 / 21 |
+| pp @49K / 98K | 2 758 / 2 363 | **7 563 / 5 239** | 1 316 / — | 1 327 / — | 7 385 / 4 994 | 1 050 / 957 |
+| VRAM after deepest | 14 673 MiB | **13 611** | 14 483 | 14 976 | 15 036 | 14 038 |
+| needle | 8/8 | 8/8 | 6/6 (to 49K) | 6/6 (to 49K) | 6/8 — **98K: empty answer, 256 tokens of reasoning** (format artifact, see Table 3) | 8/8 |
+
+**Table 2 — code** (bench_12_hard RUNS=2, nine tasks, bwrap; `o122` RUNS=1; Aider hard 20 pending)
+
+| | leader | groot-iq4xs | enru-mtp | swift | gpt-oss-high | o122 |
+|---|---|---|---|---|---|---|
+| bench_12 PASS | **12/18** | 8/18 | 5/18 | 5/18 | 4/18 | 2/9 (6 TIMEOUT) |
+| 2/2 held | ledger, chain6, chain10, rules | ledger, chain10, longctx | — | ledger, reconcile | tracespec | chain6, chain14 |
+| 0/2 | ebuild | chain6, rules, reconcile, ebuild | chain6, chain10, rules, tracespec | chain6, chain10, chain14, rules, tracespec, ebuild | ledger, chain10, rules, longctx, reconcile, ebuild | ledger, chain10, tracespec, reconcile, ebuild, rules (all TIMEOUT) |
+| mean PASS run | 522 s | **202 s** | 254 s | 203 s | 410 s | 1 518 s |
+| groot quant arms (RUNS=2, 11-04/05) | — | IQ4_XS 13, Q4_K_M 13, Q4_K_S 11, Q4_0 10 | | | | |
+| Aider hard 20 (`q-aider-1105`) | pending | pending | pending | pending | pending | skipped (speed) |
+
+bench_12 at RUNS=2 moves ±3 between sessions for the same model (groot 13 → 8 overnight on the same
+file), so only the leader-vs-rest gap (12 vs ≤8) is a finding; the order of the 4–8 group is not.
+`ebuild` is 0/2 for everyone: the ldflags trap holds against the whole fleet.
+
+**Table 3 — long context** (bench_08_horizon chain part, NS 1/4/8/16, REPS 10, 290 steps per fill; p_step = per-step correctness)
+
+| fill | leader | groot-iq4xs | enru-mtp | swift | gpt-oss-high | o122 |
+|---|---|---|---|---|---|---|
+| 0 | 0.903 ±.017 | 0.976 | **0.990** | **0.997** | 0.934 | 0.914 |
+| 16K | 0.903 | 0.976 | 0.990 | **1.000** | 0.997 | 0.966 |
+| 32K | 0.962 | 0.986 | **0.997** | 0.993 | 0.993 | 0.986 |
+| 98K | 0.966 | 0.972 | — | — | **0.997** | 0.990 |
+| N_max(S=0.5) @98K | 20 | 23 | — (173 @32K) | — (99 @32K) | **173** | 63 |
+
+Nobody decays with fill on this chain; the leader is the LOWEST at every fill (its loss is at the
+step level, not the context level) and groot holds a longer chain than the leader everywhere. The
+gpt-oss 98K needle MISS is therefore a format artifact (reasoning consumed the 256-token answer
+budget), not a context failure.
+
+**Table 4 — language and tools** (8 Polish prompts, thinking off, graded by hand 0–2: 2 = usable as is, 1 = usable with edits, 0 = unusable; tools = bench_14, same session for groot arms, 11-03/04 hunt for the rest)
+
+| | leader | groot-iq4xs | enru-mtp | swift | gpt-oss-high | o122 |
+|---|---|---|---|---|---|---|
+| Polish /16 | 12 | **0** | 9 | 11 | 14 | **15** |
+| typical miss | case slips (`Fotosyntezę to`), `koń` miejscownik, Cyrillic token in an explanation | answers in English/Chinese, loops (3 418 tokens on one prompt) | invented words (`wiadność`, `opartowalność`), `koń` declension collapses, wrong aspect theory | `koń` dopełniacz `kon`, wrong aspect theory, Polish-Latin blends | `koń` celownik/wołacz, `niedokładny` for `niedokonany` | one 4-sentence answer where 3 were asked |
+| tokens on the 8 prompts | 1 466 | 8 263 | 2 183 | 1 650 | 9 538 (hidden reasoning) | 1 344 |
+| tools 6/6 | yes | yes | yes | yes | yes | yes |
+
+**Table 5 — roles after the finals** (recommendation; the "Roles in service today" table above changes only on the user's word)
+
+| Role | Today | Recommended | Why |
+|---|---|---|---|
+| serious agentic (default) | `ornith15-128k-mc` | **keep** | bench_12 12/18 vs 8/18 for the runner-up, same session; Polish 12/16 |
+| fast coding tier (default), English/code | `gpt-oss20b-udq8kxl-high` | **`groot-19b-iq4xs`** | 1.3–1.5× gpt-oss tg at depth, bench_12 8 vs 4, bench_07 19/20 vs 17/20 and 15/20, parser 20/20, horizon ≥ gpt-oss to 32K; 13.6 GiB whole |
+| fast tier with Polish | — | `gpt-oss20b-udq8kxl-high` | Polish 14/16, 98K chain 0.997; keep as the fallback when Polish output matters |
+| fast tier, speed pick | `ornith15-gsq3` — demoted to the HDD 2026-11-04 (parser 8/12 in the promotion run); retire once Groot is confirmed | **retire** (demoted to HDD 11-04) | parser 8/12, regex 0/3 in the promotion run; groot is faster and cleaner |
+| slow-but-smart alternate | `ornith122-iq2` | keep as is | Polish 15/16, horizon 0.99, but 20 tok/s: bench_12 6 TIMEOUTs; not for time-boxed work |
+| 27B alternates | `enru-27b-mtp`, `swift-27b-mtp2-kv4` | **neither promoted** | bench_12 5/18 each, Polish 9 and 11, horizon excellent to 32K; 53K ctx only. `enru-27b` plain stays the 27B candidate on parser evidence |
 
 ### In service, by role
 
@@ -142,9 +210,9 @@ Roles in service today (2026-10-30):
 | `enru-27b` (Igor282 qwen3.8-27b-pruned-enru: weights untouched, tokenizer 248k → 173k, CJK/Arabic/Indic scripts cut) | qwen35 hybrid 27B (MTP head present, not used) | IQ3_XXS imatrix, 10.99 GB (3.31 bpw; FFN 3.08, gated-delta 3.72, attention 3.02) | whole, 14.0 GiB @49K, q8_0 KV | 54 @49K, pp ~1 400 (63 @1K) | needle 6/6; bench_14 tools **6/6**; parser tier ×2 **8/8, regex 2/2** (249, 474 s); **bench_07 10/10**, median 179 s; Polish: very good (identical PL tokenisation to the original) | **CANDIDATE 2026-11-03** — first 27B with 8/8 on this card; same session control `swift-27b-mtp2-kv4` 4/4 (regex 130 s) at roughly half the run time (MTP); q8_0 KV with 2 GiB spare where swift needs q4_0. Next: an `enru-27b-mtp` arm (`--spec-type draft-mtp`; the card warns the draft head was not retrained after the vocab cut) |
 | `saluki-27b` (ConwayResearch Underdog-Saluki-27B-1.0, tool-call tuned) | qwen35 hybrid 27B, MTP dropped | ISTA GSQ-RCO IQ2 mix, 7.90 GB (2.35 bpw; embeddings IQ1_M) | whole, 11.7 GiB @49K | 62 @49K, pp ~1 280 (70 @1K) | needle 6/6; tools **6/6**; parser ×2 **5/8** (interp 9/13 once, **regex 0/2**: 0/14, 11/14); bench_07 10/10, median 184 s; Polish good, minor errors | **alternate, not promoted 2026-11-03** — best of the 2-bit pair; loses exact code to the same-session control (swift 4/4) |
 | `caphlon-27b` (ssuasd Caphlon-Model: unsloth IQ2_S + vocab cut to 100k merges + layers 12–15 removed) | qwen35 hybrid, **60** layers, MTP dropped | IQ2_S, 7.38 GB (2.47 bpw) | whole, 11.3 GiB @49K | **67 @49K** (79 @1K), pp ~1 400 | needle 6/6; tools 5/6 (`decline`: invents the city); parser ×2 **4/8** (pass 2: 1/4); bench_07 10/10, median 192 s; **Polish unusable** (wrong content, invented words; +17 % tokens per PL sentence) | **REJECTED 2026-11-03** — fastest 27B, weakest everywhere else; GGUF + profile deleted 2026-11-04 |
-| `groot-19b` (GrootTeam Groot-19B-A3B-261023: Qwen3.6-35B-A3B with experts pruned 256 → 128 + <0.1B tokens post-training) | qwen35moe A3B, 128 experts | Q4_0, 13.8 GB | **whole** (ncmoe 0), 13.8 GiB @49K | **169 @49K** | tools 6/6; parser ×2 **8/8, regex 2/2**; **bench_07 10/10, median 48 s** (fastest in this log); Polish **unusable** (mixed languages) | **CANDIDATE 2026-11-04, fast tier** — promotion run `night/q-groot-1104.sh` started 11-04: RUNS=20 + parser ×3 vs `ornith15-128k-mc` + `ornith15-gsq3`, card coding sampling (temp 0.6, presence 0.0). English/code only |
-| `ornith122-iq2` (unsloth Ornith-1.5-122B-A10B) | qwen35moe 122B-A10B | UD-IQ2_XXS | 40 (floor 38; 36 boot fail), 13.9 GiB @49K | 20 @49K | tools 6/6; parser ×2 **8/8, regex 2/2** (690, 705 s); **bench_07 10/10**, median 399 s; Polish very good | **ALTERNATE 2026-11-04, slow-but-smart** — quality of the leader at 1/5 the speed; the 10-29 ">100B" rejection was never measured |
-| `enru-27b-mtp` (`enru-27b` + `--spec-type draft-mtp`) | qwen35 hybrid 27B + MTP | as `enru-27b` | whole, 14.9 GiB @49K | **89 @49K** (54 without MTP) | tools 6/6; parser pass 1 3/4 (regex TIMEOUT 10/14), pass 2 lost to infra; bench_07 10/10, median 121 s | **unresolved 2026-11-04** — rerun parser ×2; the draft head was not retrained after the vocab cut |
+| `groot-19b-iq4xs` / `groot-19b` (GrootTeam Groot-19B-A3B-261023: Qwen3.6-35B-A3B with experts pruned 256 → 128 + <0.1B tokens post-training; bartowski IQ4_XS / Q4_0 / Q4_K_S / Q4_K_M on disk) | qwen35moe A3B, 128 experts | IQ4_XS 10.9 GB (Q4_K_M 12.5 GB = quality alternate, Q4_0 11.0 GB = fastest decode) | **whole** (ncmoe 0), 13.6 GiB after 98K (Q4_K_M 15.1 GiB) | **157 @49K, 136 @98K, pp 7 560** (Q4_0 167 @49K) | tools 6/6; parser **20/20** (11-03 → 11-04); **bench_07 19/20, median 49 s** (leader 138 s); bench_12 RUNS=2: 13 → 8 across two sessions (quant arms IQ4_XS 13, Q4_K_M 13, Q4_K_S 11, Q4_0 10; leader 12 same session); horizon p 0.97–0.99 flat to 98K; Polish **0/16** (unusable) | **RECOMMENDED fast coding tier (English/code only), 2026-11-05** — card sampling temp 0.6, top_p 0.95, top_k 20, presence 0.0; tables above |
+| `ornith122-iq2` (unsloth Ornith-1.5-122B-A10B) | qwen35moe 122B-A10B | UD-IQ2_XXS | 40 (floor 38; 36 boot fail), 14.0 GiB after 98K | 21–22 at every depth, pp 1 050 | tools 6/6; parser ×2 **8/8, regex 2/2** (690, 705 s); **bench_07 10/10**, median 399 s; bench_12 RUNS=1 2/9 with **6 TIMEOUTs** (1 500 s budgets); horizon 0.99 @98K; Polish **15/16**, best of the fleet | **ALTERNATE, slow-but-smart (2026-11-05)** — the leader's quality at 1/5 the speed; fine for chat and Polish, out of budget for time-boxed agent work |
+| `enru-27b-mtp` (`enru-27b` + `--spec-type draft-mtp`) | qwen35 hybrid 27B + MTP | as `enru-27b` | whole, 14.5 GiB @49K | **92 @49K** (54 without MTP), pp 1 316 | tools 6/6; parser pooled 10/12, **regex 1/3** (two 13/14 near-misses); bench_07 10/10, median 121 s; bench_12 5/18; horizon 0.99 to 32K; Polish 9/16 | **speed alternate of `enru-27b`, not promoted (2026-11-05)** — the draft head was not retrained after the vocab cut; plain `enru-27b` keeps the 27B candidate status (regex 2/2) |
 | `adq4-mc` (Ornith-1.5-35B-A3B, AtomicChat AD-Q4_K-IQ4_XS imatrix) | qwen35moe | Q4_K + IQ4_XS, 18.74 GiB, KLD 0.0315 (Q4_K_M 0.0477) | 27 (floor 25 on b12001) + `--moe-cache-mib 2958`, `-ub 2048` | 99 @49K, pp 3 000 (b12001) | needle 6/6; parser tier ×2: **8/8, regex 2/2** (241, 763 s); **bench_07 20/20, every item 20/20**, median **194 s** | **alternate, no reason to switch (2026-10-18)** — the better KLD buys nothing on these benches, decode = leader at 49K, agent runs 22 % slower (IQ4_XS experts dequantize slower on the CPU) |
 | `ornith15-128k` (Ornith-1.5-35B-A3B) | qwen35moe | Q4_K_M, 20.22 GiB | 20 (floor 18), `-ub 2048` since 10-01 | 55 @49K, pp 2 691 | parser tier N=7: template/interp/perf 7/7 each; **regex 2/7 PASS** (744 s and 670 s on 09-19 — first non-gpt-oss regex passes in this log; 14/14 scored-but-late once, 5/14 once); **bench_07 20/20 PASS, every rubric item 20/20** (2026-09-20) | no-patch fallback of `ornith15-128k-mc` (2026-10-01); was **DEFAULT serious agentic** 09-19 → 09-30 ( beats Ornith 1.0 on interp, same VRAM shape and speed; Tiel-Coder tied it at N=3) — **best on both axes**, the first perfect bench_07 in this log |
 | `tiel-128k` (Tiel-Coder-35B-A3B, coder finetune of the Ornith 1.5 base) | qwen35moe | UD-Q4_K_XL, 20.82 GiB | 21 (14.4 GiB after a 51K request) | 50 @51K depth, pp 1885 | parser tier N=3: template/interp/perf 3/3 each, regex 1/3 PASS (340 s = fastest regex pass ever, then 2× TIMEOUT no file) | tied with `ornith15-128k` at N=3 — no measurable coder-finetune edge; 21 GB kept only as an alternate, delete candidate |

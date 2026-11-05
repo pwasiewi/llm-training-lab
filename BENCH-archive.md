@@ -3338,3 +3338,78 @@ Verdicts:
   (12 kinds × 10 layers: q/k/v/w/b/f/g, decay, o_norm — a memory module) that mainline does not
   know. Needs the author's llama.cpp fork; the queue's "floor FAIL" is not a VRAM result.
 - Control 4/4 in the same session rules out drift for the losses above.
+
+## 2026-11-05 — finalists in one session (night/q-final-1105.sh, 01:38 → 17:22, rc=0, 0 Xid) + Groot quant arms (q-groot-quant-1106, q-groot-q4km-1106)
+
+Live tables: `BENCH.md` "Finalists in one session — 2026-11-05". This section keeps the per-task
+evidence. Installed llama.cpp b12001. Logs `night/final-*.log`, `night/gq-*.log`, summaries
+`night/q-final-1105.summary.tsv`, `night/q-groot-quant-1106.summary.tsv`.
+
+### Groot quant arms (same args and card sampling; depth 1K/16K/49K/98K ×2 needle, tools, parser ×1, bench_12 RUNS=2)
+
+| | IQ4_XS 10.94 GB | Q4_K_S 11.53 GB | Q4_0 11.04 GB | Q4_K_M 12.48 GB |
+|---|---|---|---|---|
+| tg @1K / 16K / 49K / 98K | 178 / 173 / 151 / 135 | 185 / 174 / 157 / 139 | **205 / 190 / 167 / 146** | 173 / 163 / 147 / 127 |
+| pp @49K | 7 368 | 7 354 | 7 226 | 7 391 |
+| VRAM after 98K | **13 753 MiB** | 14 399 | 13 941 | 15 076 (ncmoe 0 held, the `-n2` fallback not needed) |
+| needle / tools / parser | 8/8, 6/6, 4/4 | 8/8, 6/6, 4/4 | 8/8, 5/6 (`longarg` INCONC), 4/4 | 8/8, 6/6, 4/4 |
+| bench_12 RUNS=2 | **13/18** | 11/18 | 10/18 | **13/18** |
+| 2/2 | chain6, chain10, chain14, longctx, tracespec | chain6, chain14, ledger, tracespec | chain6, chain14, ledger, longctx | chain6, chain10, chain14, ledger, rules |
+| 0/2 | ebuild | ebuild, reconcile | reconcile, rules, tracespec | ebuild |
+
+Winner by the queue rule (boot OK, no needle miss, highest bench_12, tie → smaller file): **IQ4_XS**.
+All four are bartowski imatrix files; the legacy Q4_0 layout is the fastest decoder and the weakest
+on the hard set. Q4_K_M is the quality alternate (1.2 GB spare at 128K).
+
+### bench_12_hard per task, finals (RUNS=2; o122 RUNS=1, per-task budgets 1 200–2 400 s)
+
+| task | leader | groot-iq4xs | enru-mtp | swift | gpt-oss-high | o122 |
+|---|---|---|---|---|---|---|
+| ledger | PP | PP | PF | PP | FF | T |
+| chain6 | PP | FF | FF | FF | PF | P 729 s |
+| chain10 | PP | PP | FF | FF | FF | T |
+| chain14 | FP | PF | PF | FF | PF | P 2 306 s |
+| tracespec | PT | PF | FF | FF | PP | T |
+| reconcile | TP | FF | FP | PP | FF | T |
+| ebuild | FF | FF | PF | FF | FF | T |
+| longctx | PF | PP | FP | PF | FF | F 797 s |
+| rules | PP | FF | FF | FF | FF | T |
+| **PASS** | **12/18** | 8/18 | 5/18 | 5/18 | 4/18 | 2/9 |
+| mean PASS / FAIL run | 522 / 493 s | 202 / 170 s | 254 / 227 s | 203 / 148 s | 410 / 354 s | 1 518 / — |
+
+P = PASS, F = FAIL, T = TIMEOUT. Groot held chain6 2/2 and rules 1/2 the night before on the same
+file (13/18): RUNS=2 session drift is ±3 on this bench; rank only on gaps larger than that.
+
+### bench_08_horizon chain (NS 1,4,8,16; REPS 10; 290 steps per fill)
+
+| fill | leader | groot | enru-mtp | swift | gpt-oss | o122 |
+|---|---|---|---|---|---|---|
+| 0 | 0.903 ±.017 (N_max 11) | 0.976 (25) | 0.990 (63) | 0.997 (173) | 0.934 (46) | 0.914 (63) |
+| 16 384 | 0.903 (9) | 0.976 (26) | 0.990 (63) | 1.000 (inf) | 0.997 (231) | 0.966 (63) |
+| 32 768 | 0.962 (15) | 0.986 (49) | 0.997 (173) | 0.993 (99) | 0.993 (99) | 0.986 (49) |
+| 98 304 | 0.966 (20) | 0.972 (23) | — | — | 0.997 (173) | 0.990 (63) |
+
+Reads the same as 10-16: no fill decay in this family; the leader's per-step p is the lowest, which
+matches its bench_12 profile (wins by persistence, not by per-step accuracy).
+
+### Polish, 8 prompts, thinking off, graded 0–2 by hand (night/final-*-polish.txt)
+
+| prompt | leader | groot | enru-mtp | swift | gpt-oss | o122 |
+|---|---|---|---|---|---|---|
+| RAM vs storage, 5 sentences | 2 | 0 (English with Polish words) | 1 (`opartowalność`) | 2 (`volatylową`) | 2 | 2 |
+| translate: linker error | 2 | 0 (Chinese) | 2 | 2 | 2 | 2 |
+| e-mail to a neighbour, ≤80 words | 1 (`Prośb`, `relak`, gender mix) | 0 (English) | 2 | 1 (`Sąsiedzku`, `cichość`) | 2 | 2 |
+| photosynthesis, 3 sentences | 1 (`Fotosyntezę to`, `Fotosyntezę jest`) | 0 (English) | 2 | 2 | 2 | 1 (4 sentences) |
+| translate: rollback | 2 | 0 (restarts, never finishes) | 0 (`wdroż wstępną wersję`, `wiadność`) | 1 (`wycofaj się do`) | 2 | 2 |
+| decline `koń` | 1 (msc. `koni`) | 0 | 0 (1 179 tokens, `konio`) | 1 (dop. `kon`, woł. `koń`) | 1 (cel. `koni`, woł. `koń`) | 2 |
+| `wziąć` vs `brać` | 1 (`aspectem`, Cyrillic, broken example) | 0 | 0 (aorist theory, `Zajmę wziąć`) | 0 (claims `brać` is archaic) | 1 (`niedokładny`) | 2 |
+| OS update, 4 steps | 2 | 0 (English) | 2 | 2 | 2 | 2 |
+| **total /16** | **12** | **0** | **9** | **11** | **14** | **15** |
+
+### Phase A (Aider hard 20) — no data
+
+All five models reported 0/20 in ten seconds, rc=127: `/mnt/cc/strata/bench-public/venv/bin/python`
+pointed at Python 3.13, removed by the 2026-11-02 ML stack bump. Venv rebuilt on 3.14 (same pins)
+2026-11-05 14:48; rerun `night/q-aider-1105.sh` chained after this queue, same TAG `final-1105-aider`.
+Lesson: a phase that ends in seconds with a round 0/N for every model is `blocked`, not a result
+(memory `reference_venv_python_bump`).

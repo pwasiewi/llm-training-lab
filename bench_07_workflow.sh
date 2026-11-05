@@ -79,6 +79,17 @@ export QWEN_CODE_SUPPRESS_YOLO_WARNING=1
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# Memory cage (2026-11-04: an agent's own python grew to 56 GB, filled swap and froze the desktop).
+# Agent + script-side tests run in a transient user scope; a runaway is OOM-killed alone and scores FAIL.
+AGENT_MEM="${AGENT_MEM:-8G}"   # empty = no cage
+cage() {
+	if [[ -n $AGENT_MEM ]] && command -v systemd-run >/dev/null; then
+		systemd-run --user --scope -q -p MemoryMax="$AGENT_MEM" -p MemorySwapMax=0 -- "$@"
+	else
+		"$@"
+	fi
+}
+
 # qwen-code prints one of these undici transport errors when llama-server
 # dies under it. A non-PASS run with one in agent.log is a LOST run, not a
 # model failure. (Same helper as bench_05_agentic.sh — keep them identical.)
@@ -618,7 +629,7 @@ run_task() {
 	"setup_$task" "$dir"
 	echo "=== [$model/$task run $run/$RUNS] running (timeout ${TASK_TIMEOUT}s, log: $dir/agent.log) ==="
 	start=$(date +%s)
-	(cd "$dir" && OPENAI_MODEL="$model" AIRAG_SOURCE=bench timeout "$TASK_TIMEOUT" \
+	(cd "$dir" && OPENAI_MODEL="$model" AIRAG_SOURCE=bench cage timeout "$TASK_TIMEOUT" \
 		"$QWEN_BIN" -m "$model" --approval-mode yolo -p "$("prompt_$task")" \
 		>"$dir/agent.log" 2>&1) || rc=$?
 	dur=$(( $(date +%s) - start ))
