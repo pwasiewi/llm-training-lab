@@ -200,8 +200,36 @@ budget), not a context failure.
 | fast coding tier (default), English/code, time-boxed | `gpt-oss20b-udq8kxl-high` | **`groot-19b-iq4xs`** | 1.3–1.5× gpt-oss tg at depth, bench_12 8 vs 4, bench_07 19/20 vs 17/20 and 15/20, parser 20/20, horizon ≥ gpt-oss to 32K; 13.6 GiB whole. Aider 9/20 in 43 min vs gpt-oss 13/20 in 176 min: Groot is the pick when the clock matters |
 | fast tier, Polish or no time limit | — | `gpt-oss20b-udq8kxl-high` | Polish 14/16, 98K chain 0.997, Aider 13/20 (runner-up to the leader, 5–1 over Groot on split tasks); the fallback when Polish output or Aider-style pass rate matters more than speed |
 | fast tier, speed pick | `ornith15-gsq3` — demoted to the HDD 2026-11-04 (parser 8/12 in the promotion run); retire once Groot is confirmed | **retire** (demoted to HDD 11-04) | parser 8/12, regex 0/3 in the promotion run; groot is faster and cleaner |
+| fast tier, speed pick (11-06 addendum) | — | `groot-19b-iq4xs-nothink` | bench_12 12/18 at 108 s mean PASS run (think: 8/18 at 202 s), Aider 4/20 in 16 min; `--reasoning off` — see "Thinking arms — 2026-11-06" |
 | slow-but-smart alternate | `ornith122-iq2` | keep as is | Polish 15/16, horizon 0.99, but 20 tok/s: bench_12 6 TIMEOUTs; not for time-boxed work |
 | 27B alternates | `enru-27b-mtp`, `swift-27b-mtp2-kv4` | **neither promoted** | bench_12 5/18 each, Polish 9 and 11, horizon excellent to 32K; 53K ctx only. `enru-27b` plain stays the 27B candidate on parser evidence |
+
+## Thinking arms — 2026-11-06 (`night/q-think-1106.sh`, TAG `think-1106r`, 00:32 → 07:23, rc=0, 0 Xid)
+
+Same llama.cpp b12001, five arms in one session: Groot IQ4_XS thinking on / off (`--reasoning off`),
+gpt-oss-20b Q8_K_XL at reasoning effort low / medium / high. Aider hard 20 for all five; bench_12_hard
+RUNS=2 for the three arms without a number. Evidence: `BENCH-archive.md` "2026-11-06 — thinking arms".
+
+| | `groot-19b-iq4xs` (think) | `groot-19b-iq4xs-nothink` | `gpt-oss20b-udq8kxl-low` | `gpt-oss20b-udq8kxl` (medium) | `gpt-oss20b-udq8kxl-high` |
+|---|---|---|---|---|---|
+| Aider hard 20 | 7/20 | 4/20 | 5/20 | 7/20 | 8/20 |
+| Aider wall for 20 | 50 min | **16 min** | **8 min** | 34 min | 161 min |
+| Aider paired (exact McNemar) | 4–1 over nothink, p 0.375 | — | 2–5 vs high, p 0.453 | 1–2 vs high, p 1.0 | 3–2 over groot-think, p 1.0 |
+| bench_12 RUNS=2 | 8/18 (finals; 13/18 the night before) | **12/18** | 0/18 | 0/18 | 4/18 (finals) |
+| bench_12 mean PASS run | 202 s | **108 s** | — | — | 410 s |
+
+Reading: **thinking off costs Groot nothing on the multi-step own tasks** (12/18 = the leader's finals
+count, 2/2 on chain6, chain10, tracespec, longctx, rules) and halves the run time, but on Aider it
+drops 7 → 4 (not separable at N=20). With the ±3 bench_12 session drift this is "not worse, 2× faster",
+not "better". **gpt-oss reasoning effort does not separate on Aider** (5 / 7 / 8 in 8 / 34 / 161 min)
+and **low and medium are 0/18 on bench_12** — the multi-step tasks are beyond gpt-oss-20b at any effort
+(high: 4/18). Session drift on Aider is large: gpt-oss-high 13/20 on 11-05 → 8/20 today, Groot 9 → 7 on
+unchanged profiles; the 11-05 "runner-up" reading of gpt-oss-high is one session's result. Role
+consequence (recommendation; the table above changes only on the user's word): fast tier stays
+`groot-19b-iq4xs` with thinking on for exercise-style edits; `groot-19b-iq4xs-nothink` is the speed pick
+for time-boxed multi-step agent runs (replaces the retired gsq3); `gpt-oss20b-udq8kxl-low` is not worth a
+role, medium is the sane gpt-oss setting when Polish is not needed (same Aider count as high in 1/5 of
+the time), high stays for Polish.
 
 ### In service, by role
 

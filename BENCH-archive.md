@@ -3465,3 +3465,92 @@ Reading: only the leader separates from the pack at N=20 (vs groot p 0.031, vs e
 is the runner-up on pass rate and takes 5 of the 6 tasks it splits with Groot, at four times the wall
 time (reasoning tokens: `python/connect` alone cost 35.9K completion tokens). Groot's wall time is the
 leader's with half the passes. Five tasks beat every model.
+
+## 2026-11-06 — thinking arms (night/q-think-1106.sh, TAG think-1106r, 00:32 → 07:23, rc=0, 0 Xid)
+
+Does the amount of thinking move the fast tier? Five arms in ONE session on llama.cpp b12001: Groot
+IQ4_XS with its template thinking on (`groot-19b-iq4xs`) and off (`groot-19b-iq4xs-nothink`,
+`--reasoning off`), gpt-oss-20b UD-Q8_K_XL at `--reasoning-effort` low / medium (plain profile, model
+default) / high. Phase A = Aider hard 20 for all five (two tries per task); phase B = bench_12_hard
+RUNS=2 for the three arms that had no bench_12 number. The first launch (TAG think-1106) died 3 min in
+with the 23:28 reboot; this is the relaunch. Live tables: `BENCH.md` "Thinking arms — 2026-11-06".
+Logs `night/think-*-b13.log`, `night/think-*-b12.log`, summary `night/q-think-1106.summary.tsv`,
+rows `/mnt/cc/strata/bench-public/runs/think-1106r/results.tsv`.
+
+| arm | profile | Aider PASS | try 1 | wall 20 | bench_12 RUNS=2 | mean PASS / FAIL run |
+|---|---|---|---|---|---|---|
+| groot-think | `groot-19b-iq4xs` | 7/20 | 2 | 50 min | 8/18 (finals 11-05), 13/18 (11-04) | 202 / 170 s (finals) |
+| groot-nothink | `groot-19b-iq4xs-nothink` | 4/20 | 2 | **16 min** | **12/18** | **108 / 119 s** |
+| gptoss-low | `gpt-oss20b-udq8kxl-low` | 5/20 | 1 | **8 min** | 0/18 | — / 98 s |
+| gptoss-med | `gpt-oss20b-udq8kxl` | 7/20 | 0 | 34 min | 0/18 | — / 237 s |
+| gptoss-high | `gpt-oss20b-udq8kxl-high` | 8/20 | 3 | 161 min | 4/18 (finals 11-05) | 410 / 354 s (finals) |
+
+No TIMEOUT, no lost row in Aider. Per task (`bench13/select_core.py --paired`):
+
+```
+SUITE TASK                                                 groot-19b-iq4xs groot-19b-iq4xs-nothink  gpt-oss20b-udq8kxl-low      gpt-oss20b-udq8kxl gpt-oss20b-udq8kxl-high  
+aider cpp/dnd-character                                                  F                       F                      P2                       F                       F *
+aider cpp/spiral-matrix                                                  F                       F                       F                       F                       F  
+aider cpp/zebra-puzzle                                                  P1                      P1                       F                      P2                      P1 *
+aider go/matrix                                                         P2                       F                       F                       F                       F *
+aider go/poker                                                           F                       F                       F                       F                       F  
+aider go/react                                                           F                       F                       F                       F                       F  
+aider go/dominoes                                                       P1                      P1                      P1                      P2                      P1  
+aider java/go-counting                                                   F                       F                       F                       F                       F  
+aider java/word-search                                                   F                       F                       F                       F                       F  
+aider java/connect                                                       F                       F                       F                       F                       F  
+aider javascript/wordy                                                   F                      P2                       F                       F                       F *
+aider javascript/complex-numbers                                        P2                      P2                      P2                      P2                      P2  
+aider javascript/scale-generator                                        P2                       F                       F                       F                      P2 *
+aider javascript/parallel-letter-frequency                               F                       F                      P2                      P2                       F *
+aider python/connect                                                     F                       F                       F                      P2                      P2 *
+aider python/transpose                                                  P2                       F                       F                       F                      P1 *
+aider python/react                                                       F                       F                       F                       F                       F  
+aider rust/luhn-from                                                    P2                       F                       F                       F                       F *
+aider rust/macros                                                        F                       F                       F                      P2                      P2 *
+aider rust/grade-school                                                  F                       F                      P2                      P2                      P2 *
+cells: P/F (1 run), P1/P2 = aider pass on try 1/2, k/n (several runs), L = lost, '.' = not run
+Pairwise (tasks where one model's pass rate is higher; one pair per TASK; exact McNemar):
+  groot-19b-iq4xs vs groot-19b-iq4xs-nothink: groot-19b-iq4xs-only 4, groot-19b-iq4xs-nothink-only 1, p = 0.375
+  groot-19b-iq4xs vs gpt-oss20b-udq8kxl-low: groot-19b-iq4xs-only 5, gpt-oss20b-udq8kxl-low-only 3, p = 0.727
+  groot-19b-iq4xs vs gpt-oss20b-udq8kxl: groot-19b-iq4xs-only 4, gpt-oss20b-udq8kxl-only 4, p = 1.000
+  groot-19b-iq4xs vs gpt-oss20b-udq8kxl-high: groot-19b-iq4xs-only 2, gpt-oss20b-udq8kxl-high-only 3, p = 1.000
+  groot-19b-iq4xs-nothink vs gpt-oss20b-udq8kxl-low: groot-19b-iq4xs-nothink-only 2, gpt-oss20b-udq8kxl-low-only 3, p = 1.000
+  groot-19b-iq4xs-nothink vs gpt-oss20b-udq8kxl: groot-19b-iq4xs-nothink-only 1, gpt-oss20b-udq8kxl-only 4, p = 0.375
+  groot-19b-iq4xs-nothink vs gpt-oss20b-udq8kxl-high: groot-19b-iq4xs-nothink-only 1, gpt-oss20b-udq8kxl-high-only 5, p = 0.219
+  gpt-oss20b-udq8kxl-low vs gpt-oss20b-udq8kxl: gpt-oss20b-udq8kxl-low-only 1, gpt-oss20b-udq8kxl-only 3, p = 0.625
+  gpt-oss20b-udq8kxl-low vs gpt-oss20b-udq8kxl-high: gpt-oss20b-udq8kxl-low-only 2, gpt-oss20b-udq8kxl-high-only 5, p = 0.453
+  gpt-oss20b-udq8kxl vs gpt-oss20b-udq8kxl-high: gpt-oss20b-udq8kxl-only 1, gpt-oss20b-udq8kxl-high-only 2, p = 1.000
+```
+
+### bench_12_hard per task, the three new arms (RUNS=2, same budgets as the finals)
+
+| task | groot-nothink | gptoss-low | gptoss-med | groot-think (finals) | gptoss-high (finals) |
+|---|---|---|---|---|---|
+| ledger | FP | FF | FF (7/11 then 1/11) | PP | FF |
+| chain6 | PP | FF | FF | FF | PF |
+| chain10 | PP | FF | FF | PP | FF |
+| chain14 | FF (8/14, 1/14) | FF | FF | PF | PF |
+| tracespec | PP | FF (3/10 ×2) | FF (4/10, 7/10) | PF | PP |
+| reconcile | FF (7/8 ×2, `speed3x` only) | FF | FF (6/8 ×2) | FF | FF |
+| ebuild | FP | FF | FF | FF | FF |
+| longctx | PP | FF | FF (6/8, 1/8) | PP | FF |
+| rules | PP | FF | FF | FF | FF |
+| **PASS** | **12/18** | 0/18 | 0/18 | 8/18 | 4/18 |
+
+Reading. (1) Groot with thinking OFF equals the leader's finals count on bench_12 (12/18, the leader's
+tasks: it holds chain6, chain10, rules, tracespec, longctx 2/2, loses chain14 and reconcile on one rubric
+item) at half the run time (mean PASS run 108 s vs 202 s), while on Aider it drops 7 → 4 (4–1 on split
+tasks, p 0.375, not separable at N=20) and runs the 20 tasks in 16 min instead of 50. Thinking buys
+Groot something on single-file exercise solving and nothing on the multi-step own tasks — and the ±3
+session drift on bench_12 (groot-think 13 → 8 on the same file) means 12 vs 8 is at the edge of the
+noise, so the finding is "not worse, 2× faster", not "better". (2) gpt-oss reasoning effort: low 5 /
+medium 7 / high 8 on Aider in 8 / 34 / 161 min; no pair separable (low vs high 2–5, p 0.453). On
+bench_12 low and medium are 0/18 — no task passed in either run; medium's `[API Error: … peg-native
+format]` on ledger and ebuild and a 2/2 FAIL on `rules` (gpt-oss-high also 0/2 there in the finals)
+say the multi-step own tasks are out of reach for this model at any effort; high's 4/18 in the finals
+is the ceiling. (3) Session drift on Aider: the same `gpt-oss20b-udq8kxl-high` scored 13/20 on 11-05
+and 8/20 here, `groot-19b-iq4xs` 9 → 7; the JavaScript set that passed for everyone on 11-05 fell for
+three arms today. Aider N=20 single-run counts move by up to 5 between days — only the paired
+same-session matrix is evidence, and the "gpt-oss-high is the runner-up" reading of 11-05 is a
+one-session result.
